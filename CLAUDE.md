@@ -20,8 +20,10 @@ Do-it finds documents through the Google Drive connector (his docs live in Drive
 ## Personal intelligence
 This is his personal "second brain" widget, not a generic wrapper.
 - **Knows him:** Do-it runs inside his dotgithub checkout (`~/Github`), and its prompt points it at `knowledge/me/profile.md` and `knowledge/me/facts.md` so it already knows who he is and doesn't re-ask.
-- **Remembers:** every successful exchange is appended to `~/.local/state/claude-buddy/history.jsonl`; `build_prompt()` prepends the last `HISTORY_KEEP` exchanges to the next prompt, so both modes keep continuity across a fresh `claude -p` each time. Local only, never synced.
-- **Not yet built (needs his call):** writing durable learnings back into the dotgithub brain. `~/Github` is the shared primary checkout with strict write rules (concurrency, sourced facts, commit gate), so Pip reads the brain but does not auto-write it. "Remember this about me" → a deliberate, sourced `facts.md` line, not silent learning.
+- **Short-term memory:** every successful exchange is appended to `~/.local/state/claude-buddy/history.jsonl`; `build_prompt()` prepends the last `HISTORY_KEEP` exchanges to the next prompt.
+- **Durable memory:** `LEARNED_FILE` (`~/.local/state/claude-buddy/learned.md`) holds facts Pip has been told to remember; `load_learned()` + `compose_prompt()` feed them into every prompt, both modes. "Remember this about me" → Do-it appends a dated line to `learned.md` **and** a sourced line to `knowledge/me/facts.md`, but **never commits/pushes** — so the daily-commit gate and other sessions are untouched; the facts.md line goes up on his next deliberate dotgithub save.
+- **Sees the screen:** the right-click **Look at my screen…** captures all monitors to `SCREEN_FILE` via `capture_screen()` (Pillow; degrades gracefully without it) and forces Do-it, which reads the PNG with the Read tool. Ask mode has no screen access by design.
+- All local state is on his machine only, never synced.
 
 ## Rules
 - No hardcoded secrets or API keys anywhere. Claude calls go through the `claude` CLI login; `claude_env()` strips API keys so calls never bill per token.

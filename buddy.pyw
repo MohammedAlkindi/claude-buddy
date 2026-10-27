@@ -41,6 +41,11 @@ LOG_FILE = APP_DIR / "buddy.log"
 HISTORY_FILE = APP_DIR / "history.jsonl"
 HISTORY_KEEP = 6
 HISTORY_REPLY_CHARS = 500
+# Durable facts Pip has learned about him, beyond the rolling history. Pip's own
+# copy, always loaded into context so it never re-asks what it has been told.
+LEARNED_FILE = APP_DIR / "learned.md"
+# Where a screen capture is written for Do-it to read.
+SCREEN_FILE = APP_DIR / "screen.png"
 
 GITHUB_DIR = Path.home() / "Github"  # dotgithub checkout: his CLAUDE.md and brain, for Do-it
 
@@ -65,8 +70,12 @@ DO_SYSTEM = ("You are Mohammed's personal intelligence, answering from a small s
              "check. Do not take irreversible or outward actions he did not ask for: no deleting, "
              "no force-push, no sending messages or posting, no spending. Recent exchanges may "
              "be included for continuity, which carry across questions, so use them and don't "
-             "say you can't remember. When a task is ambiguous, do the safest useful version "
-             "and say what you did.")
+             "say you can't remember. When he tells you to remember something durable about "
+             "him, append one line to his personal memory file at " + LEARNED_FILE.as_posix() +
+             " (create it if missing) as `- YYYY-MM-DD: <fact>`, and append the same to "
+             "knowledge/me/facts.md as `- YYYY-MM-DD: <fact> (source: Mohammed, via Claude "
+             "Buddy)`; do not commit or push either file. When a task is ambiguous, do the "
+             "safest useful version and say what you did.")
 
 MODES = {
     # Ask: no tools, no context load, safe by construction. Fast.
@@ -246,6 +255,37 @@ def build_prompt(history, user_prompt):
     return "\n".join(lines)
 
 
+def load_learned():
+    try:
+        return LEARNED_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def compose_prompt(learned, history, user_prompt):
+    """Durable facts, then recent exchanges, then the new question."""
+    base = build_prompt(history, user_prompt)
+    if learned.strip():
+        return ("[Durable facts you already know about Mohammed — treat as known, don't re-ask:]\n"
+                + learned.strip() + "\n\n" + base)
+    return base
+
+
+def capture_screen(path):
+    """Grab all monitors to a PNG for Do-it to read. Needs Pillow; False without it."""
+    try:
+        from PIL import ImageGrab
+    except ImportError:
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ImageGrab.grab(all_screens=True).save(path)
+        return True
+    except (OSError, ValueError) as exc:
+        log(f"screen capture failed: {exc}")
+        return False
+
+
 def parse_stream_line(line):
     """Turn one stream-json line into events for the UI.
 
@@ -360,6 +400,7 @@ class Buddy:
         self.started = 0.0
         self.stream_buf = ""
         self.pending_prompt = ""
+        self.attach_screen = None
         self.last_reply = ""
         self.last_mode = "ask"
         self.bubble_state = None
@@ -642,6 +683,19 @@ class Buddy:
         self.input.after(60, self.entry.focus_force)
         self.input.after(300, press_win_h)
 
+    def look_at_screen(self):
+        """Capture the screen, then ask Do-it about it (it reads the image)."""
+        if self.busy:
+            self.show_bubble_window()
+            return
+        if not capture_screen(SCREEN_FILE):
+            self.last_mode = "ask"
+            self.show_reply("I couldn't capture the screen. Install Pillow (pip install pillow) "
+                            "so Pip can see your screen.", error=True)
+            return
+        self.attach_screen = SCREEN_FILE.as_posix()
+        self.open_input("do")
+
     def new_claude_session(self):
         """Open a fresh interactive Claude Code session in its own window."""
         cwd = str(GITHUB_DIR) if GITHUB_DIR.exists() else str(Path.home())
@@ -666,17 +720,24 @@ class Buddy:
             return "break"
         self.entry.delete("1.0", "end")
         self.hide_input()
+        model_prompt = prompt
+        if self.attach_screen:
+            self.set_mode("do")  # reading the screenshot needs Do-it's tools
+            model_prompt = (f"Here is a screenshot of my current screen at {self.attach_screen}. "
+                            f"Read it with the Read tool, then answer: {prompt}")
+            self.attach_screen = None
         self.busy = True
         self.request_id += 1
         self.last_mode = self.mode
         self.started = time.monotonic()
         self.stream_buf = ""
         self.pending_prompt = prompt
-        full = build_prompt(load_recent_history(), prompt)  # prepend recent exchanges for continuity
-        start = "Working…" if self.mode == "do" else "Thinking…"
+        # Durable facts + recent exchanges, so Pip keeps continuity and its learned context.
+        full = compose_prompt(load_learned(), load_recent_history(), model_prompt)
+        start = "Working…" if self.last_mode == "do" else "Thinking…"
         self.set_bubble(start, thinking=True)
         self.show_bubble_window()
-        threading.Thread(target=self.worker, args=(self.request_id, self.mode, full),
+        threading.Thread(target=self.worker, args=(self.request_id, self.last_mode, full),
                          daemon=True).start()
         return "break"
 
@@ -877,6 +938,7 @@ class Buddy:
         m = self.menu = tk.Menu(self.root, tearoff=False)
         m.add_command(label="Ask Claude…", command=lambda: self.open_input("ask"))
         m.add_command(label="Do it (full tools)…", command=lambda: self.open_input("do"))
+        m.add_command(label="Look at my screen…", command=self.look_at_screen)
         m.add_command(label="Dictate (Win+H)", command=self.start_dictation)
         m.add_command(label="New Claude Code session", command=self.new_claude_session)
         m.add_separator()

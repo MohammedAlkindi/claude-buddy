@@ -158,6 +158,19 @@ class HistoryMemory(unittest.TestCase):
         self.assertEqual([r["prompt"] for r in rows], ["q1", "q2"])
         self.assertLessEqual(len(rows[1]["reply"]), buddy.HISTORY_REPLY_CHARS)
 
+    def test_compose_prompt_adds_learned_facts(self):
+        out = buddy.compose_prompt("- likes teal", [], "hi")
+        self.assertIn("likes teal", out)
+        self.assertTrue(out.rstrip().endswith("hi"))
+
+    def test_compose_prompt_without_learned_is_just_history(self):
+        self.assertEqual(buddy.compose_prompt("", [], "hi"), buddy.build_prompt([], "hi"))
+
+    def test_load_learned_missing_file_is_empty(self):
+        import pathlib
+        with mock.patch.object(buddy, "LEARNED_FILE", pathlib.Path("does-not-exist.md")):
+            self.assertEqual(buddy.load_learned(), "")
+
 
 class RoundRect(unittest.TestCase):
     def test_corners_stay_inside_the_box(self):
