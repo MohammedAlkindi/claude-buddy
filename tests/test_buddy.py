@@ -122,6 +122,20 @@ class ModeWiring(unittest.TestCase):
         self.assertNotIn("--safe-mode", args)
 
 
+class SessionLaunch(unittest.TestCase):
+    def test_uses_windows_terminal_when_present(self):
+        self.assertEqual(buddy.session_launch_command("claude.exe", True, r"C:\gh"),
+                         ["wt", "-d", r"C:\gh", "claude.exe"])
+
+    def test_falls_back_to_console(self):
+        cmd = buddy.session_launch_command("claude.exe", False, r"C:\gh")
+        self.assertEqual(cmd[:3], ["cmd", "/c", "start"])
+        self.assertEqual(cmd[-3:], ["cmd", "/k", "claude.exe"])
+
+    def test_defaults_exe_name_when_missing(self):
+        self.assertEqual(buddy.session_launch_command(None, True, "C:\\")[-1], "claude")
+
+
 class RoundRect(unittest.TestCase):
     def test_corners_stay_inside_the_box(self):
         points = buddy.round_rect(0, 0, 100, 50, 10)

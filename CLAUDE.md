@@ -15,6 +15,8 @@ The pencil has two modes, chosen in the input box. Both stream the reply.
 
 Both are defined in `MODES`; change flags there, not scattered through the code.
 
+Do-it finds documents through the Google Drive connector (his docs live in Drive). The right-click menu's **New Claude Code session** opens a fresh interactive `claude` in Windows Terminal (or a console), built by the pure `session_launch_command()`.
+
 ## Rules
 - No hardcoded secrets or API keys anywhere. Claude calls go through the `claude` CLI login; `claude_env()` strips API keys so calls never bill per token.
 - The only external call is `stream_claude()`; it emits `("text", ...)`, `("tool", name)`, `("result", ok, text)` events and never raises to the UI. `parse_stream_line()` turns one stream-json line into those events.

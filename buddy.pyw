@@ -47,8 +47,9 @@ ASK_SYSTEM = ("You are answering inside a small desktop speech bubble. Keep repl
               "and write plain text, no Markdown. You have no tools; just answer.")
 DO_SYSTEM = ("You are Mohammed's desktop assistant, answering from a small speech bubble with "
              "full tools, his connectors, and his dotgithub context. Do what he asks, then "
-             "report the result in a few plain-text sentences, no Markdown. For anything on a "
-             "website, use Claude in Chrome, his real signed-in browser: load the "
+             "report the result in a few plain-text sentences, no Markdown. His documents live "
+             "in Google Drive; use the Google Drive connector to find and read them. For anything "
+             "on a website, use Claude in Chrome, his real signed-in browser: load the "
              "mcp__claude-in-chrome__* tools with ToolSearch, then act in his existing sessions. "
              "Never try to hide the automation from a site, bypass a sign-in, or defeat a bot "
              "check. Do not take irreversible or outward actions he did not ask for: no deleting, "
@@ -182,6 +183,15 @@ def claude_env():
     # CLI always answers on the logged-in Claude subscription.
     return {k: v for k, v in os.environ.items()
             if not k.startswith(("ANTHROPIC_", "CLAUDE")) or k == "CLAUDE_CONFIG_DIR"}
+
+
+def session_launch_command(exe, has_wt, cwd):
+    """How to open a new interactive Claude Code session: Windows Terminal if it
+    is present, otherwise a plain console window."""
+    exe = exe or "claude"
+    if has_wt:
+        return ["wt", "-d", cwd, exe]
+    return ["cmd", "/c", "start", "Claude Code", "cmd", "/k", exe]
 
 
 def parse_stream_line(line):
@@ -583,6 +593,17 @@ class Buddy:
         self.input.after(60, self.entry.focus_force)
         self.input.after(300, press_win_h)
 
+    def new_claude_session(self):
+        """Open a fresh interactive Claude Code session in its own window."""
+        cwd = str(GITHUB_DIR) if GITHUB_DIR.exists() else str(Path.home())
+        cmd = session_launch_command(self.claude, shutil.which("wt") is not None, cwd)
+        try:
+            subprocess.Popen(cmd, cwd=cwd)
+        except OSError as exc:
+            log(f"could not start a session: {exc}")
+            self.last_mode = "ask"
+            self.show_reply(f"Couldn't start a Claude Code session: {exc}", error=True)
+
     # ---- asking Claude ----------------------------------------------------
 
     def submit(self, event=None):
@@ -805,6 +826,7 @@ class Buddy:
         m.add_command(label="Ask Claude…", command=lambda: self.open_input("ask"))
         m.add_command(label="Do it (full tools)…", command=lambda: self.open_input("do"))
         m.add_command(label="Dictate (Win+H)", command=self.start_dictation)
+        m.add_command(label="New Claude Code session", command=self.new_claude_session)
         m.add_separator()
         m.add_command(label="Show last reply", command=self.show_bubble_window)
         m.add_command(label="Copy last reply", command=self.copy_last_reply)
