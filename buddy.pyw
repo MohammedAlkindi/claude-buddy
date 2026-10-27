@@ -1,8 +1,16 @@
-"""Claude Buddy: a floating desktop mascot that puts `claude -p` one click away.
+"""Claude Buddy: a floating desktop assistant that puts Claude one click away.
 
-Run with `pythonw buddy.pyw`. The pencil asks a question, the mic starts
-Windows voice typing (Win+H), right-click opens the menu. Replies come from the
-Claude Code CLI, so they use your Claude login rather than an API key.
+Run with `pythonw buddy.pyw`. Two modes share one pencil:
+
+- **Ask** (default): a fast, chat-only `claude` call that cannot touch files,
+  run commands, or reach your accounts. For quick questions.
+- **Do it**: full `claude` with your tools, connectors, and dotgithub context,
+  so it can find a doc, run a task, or start work. It can change things on your
+  machine, so it is a deliberate second mode, never the default.
+
+Replies stream into the speech bubble as they arrive. The mic starts Windows
+voice typing (Win+H). Right-click the mascot for the menu. Claude is reached
+through the `claude` CLI, so it uses your login, not an API key.
 """
 
 import ctypes
@@ -22,38 +30,75 @@ import traceback
 from ctypes import wintypes
 from pathlib import Path
 
-# Not %LOCALAPPDATA%: a Pip started from an MSIX app (such as the Claude desktop
-# app) would write into that app's private copy of AppData, and a Pip started at
-# sign-in would never see it.
+# State lives outside AppData: launched from an MSIX app (such as the Claude
+# desktop app), an AppData write would land in that app's private copy and be
+# lost to a Pip started at sign-in.
 APP_DIR = Path.home() / ".local" / "state" / "claude-buddy"
 STATE_FILE = APP_DIR / "state.json"
 LOG_FILE = APP_DIR / "buddy.log"
 
-# --safe-mode skips CLAUDE.md, hooks, plugins and MCP servers so a quick
-# question starts fast; --tools "" keeps the buddy chat-only.
-CLAUDE_ARGS = [
-    "-p",
-    "--safe-mode",
-    "--no-session-persistence",
-    "--tools", "",
-    "--append-system-prompt",
-    "You are answering inside a small desktop speech bubble. Keep replies "
-    "short and write plain text without Markdown formatting.",
-]
-CLAUDE_TIMEOUT = 300
+GITHUB_DIR = Path.home() / "Github"  # where dotgithub CLAUDE.md lives, for Do-it context
+
+# Flags shared by both modes: stream the reply as it is generated.
+STREAM_ARGS = ["-p", "--output-format", "stream-json", "--include-partial-messages",
+               "--verbose", "--no-session-persistence"]
+
+ASK_SYSTEM = ("You are answering inside a small desktop speech bubble. Keep replies short "
+              "and write plain text, no Markdown. You have no tools; just answer.")
+DO_SYSTEM = ("You are Mohammed's desktop assistant, answering from a small speech bubble with "
+             "full tools, his connectors, and his dotgithub context. Do what he asks, then "
+             "report the result in a few plain-text sentences, no Markdown. Do not take "
+             "irreversible or outward actions he did not ask for: no deleting, no force-push, "
+             "no sending messages or posting, no spending. When a task is ambiguous, do the "
+             "safest useful version and say what you did.")
+
+MODES = {
+    # Ask: no tools, no context load, safe by construction. Fast.
+    "ask": {
+        "label": "Ask",
+        "args": STREAM_ARGS + ["--safe-mode", "--tools", "", "--append-system-prompt", ASK_SYSTEM],
+        "cwd": str(Path.home()),
+        "timeout": 300,
+        "verb": "Claude",
+    },
+    # Do it: full tools and connectors, dotgithub context, runs unattended.
+    "do": {
+        "label": "Do it",
+        "args": STREAM_ARGS + ["--permission-mode", "bypassPermissions",
+                               "--add-dir", str(GITHUB_DIR), "--append-system-prompt", DO_SYSTEM],
+        "cwd": str(GITHUB_DIR) if GITHUB_DIR.exists() else str(Path.home()),
+        "timeout": 1800,
+        "verb": "Did it",
+    },
+}
 
 KEY = "#ff00ff"  # transparent color key; never used in the drawing
-MINT = "#86dcb8"
-MINT_SHEEN = "#bdeed8"
-MINT_DARK = "#2f8f6c"
-LEAF = "#5cc48f"
-INK = "#1f2a30"
-CHEEK = "#f4a6b8"
+CLAY = "#d97757"  # Claude terracotta
+CLAY_DARK = "#b85c3c"
+CLAY_SHEEN = "#e79a80"
+EYE = "#1f1a17"
+INK = "#2b2622"
 PAPER = "#ffffff"
-PAPER_EDGE = "#c3d3cc"
-HOVER = "#e3f5ec"
-MUTED = "#6b7b74"
+PAPER_EDGE = "#e4d8d0"
+HOVER = "#f6ece6"
+MUTED = "#8a7a70"
 ERROR = "#b3261e"
+SEL_ON = CLAY
+SEL_OFF = "#efe6e0"
+
+# Pixel grid for the mascot: '#' clay body, 'o' eye, '.' empty.
+MASCOT = [
+    "....####....",
+    "..########..",
+    ".##########.",
+    "############",
+    "###oo##oo###",
+    "###oo##oo###",
+    "############",
+    "############",
+    ".##########.",
+    "..##....##..",
+]
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -135,24 +180,78 @@ def claude_env():
             if not k.startswith(("ANTHROPIC_", "CLAUDE")) or k == "CLAUDE_CONFIG_DIR"}
 
 
-def run_claude(exe, prompt, on_start):
+def parse_stream_line(line):
+    """Turn one stream-json line into events for the UI.
+
+    Returns a list of (kind, payload): ("text", str) for a streamed chunk,
+    ("tool", name) when a tool call starts, ("result", ok, text) at the end.
+    Unknown or noise lines return [].
+    """
+    line = line.strip()
+    if not line:
+        return []
+    try:
+        obj = json.loads(line)
+    except (ValueError, TypeError):
+        return []
+    kind = obj.get("type")
+    if kind == "stream_event":
+        event = obj.get("event", {})
+        etype = event.get("type")
+        if etype == "content_block_delta":
+            delta = event.get("delta", {})
+            if delta.get("type") == "text_delta" and delta.get("text"):
+                return [("text", delta["text"])]
+        elif etype == "content_block_start":
+            block = event.get("content_block", {})
+            if block.get("type") == "tool_use":
+                return [("tool", block.get("name") or "a tool")]
+        return []
+    if kind == "result":
+        return [("result", not obj.get("is_error"), (obj.get("result") or "").strip())]
+    return []
+
+
+def stream_claude(exe, mode, prompt, on_start, emit):
+    """Run `claude` for one mode and emit UI events as its reply streams in."""
+    conf = MODES[mode]
     proc = subprocess.Popen(
-        [exe, *CLAUDE_ARGS],
+        [exe, *conf["args"]],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace",
-        env=claude_env(), cwd=str(Path.home()),
+        env=claude_env(), cwd=conf["cwd"],
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
     on_start(proc)
+
+    stderr_chunks = []
+    drain = threading.Thread(target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True)
+    drain.start()
+
     try:
-        out, err = proc.communicate(prompt, timeout=CLAUDE_TIMEOUT)
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+    except OSError:
+        pass
+
+    saw_result = False
+    for line in proc.stdout:
+        for event in parse_stream_line(line):
+            if event[0] == "result":
+                saw_result = True
+            emit(event)
+
+    try:
+        proc.wait(timeout=conf["timeout"])
     except subprocess.TimeoutExpired:
         proc.kill()
-        proc.communicate()
-        return False, "Claude took longer than 5 minutes, so I stopped it."
-    if proc.returncode == 0 and out.strip():
-        return True, out.strip()
-    return False, (err or out).strip() or f"claude exited with code {proc.returncode}"
+        emit(("result", False, f"That took longer than {conf['timeout'] // 60} minutes, so I stopped it."))
+        return
+
+    if not saw_result:
+        drain.join(timeout=1)
+        err = "".join(c for c in stderr_chunks if c).strip()
+        emit(("result", False, err or f"claude exited with code {proc.returncode}"))
 
 
 def count_wrapped_lines(text, font, width):
@@ -187,12 +286,15 @@ class Buddy:
         self.root.report_callback_exception = self.report_error
 
         self.claude = find_claude()
-        self.results = queue.Queue()
+        self.events = queue.Queue()
         self.proc = None
         self.busy = False
+        self.mode = "ask"
         self.request_id = 0
         self.started = 0.0
+        self.stream_buf = ""
         self.last_reply = ""
+        self.last_mode = "ask"
         self.bubble_state = None
         self.press = None
         self.tick_count = 0
@@ -203,6 +305,7 @@ class Buddy:
         icon_family = "Segoe Fluent Icons" if "Segoe Fluent Icons" in families else "Segoe MDL2 Assets"
         self.font = tkfont.Font(self.root, family="Segoe UI", size=10)
         self.small = tkfont.Font(self.root, family="Segoe UI", size=8)
+        self.small_bold = tkfont.Font(self.root, family="Segoe UI", size=8, weight="bold")
         self.icons = tkfont.Font(self.root, family=icon_family, size=11)
 
         self.build_mascot()
@@ -212,7 +315,7 @@ class Buddy:
         self.restore_position()
 
         self.root.after(60, self.tick)
-        self.root.after(100, self.poll_results)
+        self.root.after(80, self.poll_events)
         self.root.after(1500, self.reassert_topmost)
 
     def px(self, value):
@@ -230,42 +333,37 @@ class Buddy:
         root.attributes("-topmost", True)
         root.attributes("-transparentcolor", KEY)
         root.configure(bg=KEY)
-        self.width, self.height = self.px(134), self.px(118)
+        self.width, self.height = self.px(140), self.px(104)
         c = self.canvas = tk.Canvas(root, width=self.width, height=self.height,
                                     bg=KEY, highlightthickness=0, bd=0)
         c.pack()
-        line = max(2, self.px(2.5))
 
-        # Pip: a round mint sprout with stubby feet. Everything tagged "body" bobs.
-        for x in (30, 60):
-            c.create_oval(*self.xy(x, 100, x + 16, 112), fill=MINT_DARK, outline="", tags="body")
-        c.create_line(*self.xy(52, 30, 52, 15), fill=MINT_DARK, width=line, tags="body")
-        c.create_polygon(*self.xy(53, 18, 58, 7, 71, 3, 67, 13, 55, 19), smooth=True,
-                         fill=LEAF, outline=MINT_DARK, width=max(1, self.px(1.5)), tags="body")
-        c.create_polygon(*self.xy(51, 19, 46, 11, 36, 10, 40, 17, 50, 21), smooth=True,
-                         fill=LEAF, outline=MINT_DARK, width=max(1, self.px(1.5)), tags="body")
-        c.create_oval(*self.xy(10, 28, 94, 108), fill=MINT, outline=MINT_DARK, width=line,
-                      tags=("body", "hit"))
-        c.create_oval(*self.xy(24, 40, 40, 51), fill=MINT_SHEEN, outline="", tags=("body", "hit"))
-        for x in (35, 58):
-            c.create_oval(*self.xy(x, 56, x + 11, 72), fill=INK, outline="",
-                          tags=("body", "hit", "eye_open"))
-            c.create_oval(*self.xy(x + 3, 59, x + 7, 63), fill=PAPER, outline="",
-                          tags=("body", "hit", "eye_open"))
-            c.create_line(*self.xy(x, 65, x + 11, 65), fill=INK, width=line,
-                          state="hidden", tags=("body", "hit", "eye_closed"))
-        for x in (24, 70):
-            c.create_oval(*self.xy(x, 72, x + 10, 78), fill=CHEEK, outline="", tags=("body", "hit"))
-        c.create_arc(*self.xy(45, 68, 59, 80), start=200, extent=140, style="arc",
-                     outline=INK, width=max(1, self.px(2)), tags=("body", "hit", "smile"))
-        c.create_oval(*self.xy(49, 74, 55, 80), fill=INK, outline="", state="hidden",
-                      tags=("body", "hit", "mouth_o"))
-        for i, (x, y, r) in enumerate(((74, 22, 3), (82, 14, 4), (92, 5, 5))):
-            c.create_oval(*self.xy(x - r, y - r, x + r, y + r), fill=PAPER, outline=MINT_DARK,
-                          width=max(1, self.px(1.5)), state="hidden", tags=("body", f"dot{i}"))
+        cell = self.px(6)
+        ox, oy = self.px(14), self.px(26)
+        # Quote marks above the head, in the Claude style.
+        for qx in (self.px(34), self.px(46)):
+            c.create_rectangle(qx, self.px(8), qx + self.px(5), self.px(18),
+                               fill=CLAY, outline="", tags="body")
+        for r, row in enumerate(MASCOT):
+            for col, ch in enumerate(row):
+                if ch == ".":
+                    continue
+                x, y = ox + col * cell, oy + r * cell
+                color = EYE if ch == "o" else CLAY
+                tags = ("body", "hit", "eye") if ch == "o" else ("body", "hit")
+                c.create_rectangle(x, y, x + cell, y + cell, fill=color, outline="", tags=tags)
+        # A soft sheen block, top-left of the body.
+        c.create_rectangle(ox + cell, oy + cell, ox + 3 * cell, oy + 2 * cell,
+                           fill=CLAY_SHEEN, outline="", tags=("body", "hit"))
+        c.tag_lower("body")  # keep sheen under eyes/edges where they overlap
+        # Thinking dots, hidden until busy.
+        for i in range(3):
+            bx = ox + (3 + i * 2) * cell
+            c.create_rectangle(bx, self.px(2), bx + cell, self.px(2) + cell,
+                               fill=CLAY_DARK, outline="", state="hidden", tags=("body", f"dot{i}"))
 
-        self.add_button("pencil", 102, 34, "")
-        self.add_button("mic", 102, 72, "")
+        self.add_button("pencil", 104, 24, "")
+        self.add_button("mic", 104, 60, "")
 
         c.tag_bind("hit", "<Enter>", lambda e: c.configure(cursor="fleur"))
         c.tag_bind("hit", "<Leave>", lambda e: c.configure(cursor=""))
@@ -278,9 +376,9 @@ class Buddy:
     def add_button(self, name, x, y, glyph):
         c = self.canvas
         tag = f"btn_{name}"
-        circle = c.create_oval(*self.xy(x, y, x + 28, y + 28), fill=PAPER, outline=MINT_DARK,
+        circle = c.create_oval(*self.xy(x, y, x + 28, y + 28), fill=PAPER, outline=CLAY_DARK,
                                width=max(1, self.px(1.5)), tags=(tag, "button"))
-        c.create_text(*self.xy(x + 14, y + 14), text=glyph, font=self.icons, fill=MINT_DARK,
+        c.create_text(*self.xy(x + 14, y + 14), text=glyph, font=self.icons, fill=CLAY_DARK,
                       tags=(tag, "button"))
         c.tag_bind(tag, "<Enter>", lambda e: (c.itemconfigure(circle, fill=HOVER),
                                               c.configure(cursor="hand2")))
@@ -318,8 +416,6 @@ class Buddy:
             return
         if p["dragged"]:
             self.save_position()
-        elif p["target"] == "pencil":
-            self.toggle_input()
         elif p["target"] == "mic":
             self.start_dictation()
         else:
@@ -334,29 +430,14 @@ class Buddy:
             c.move("body", 0, offset - self.bob)
             self.bob = offset
         if self.busy:
-            shown = (t // 6) % 4
+            shown = (t // 5) % 4
             for i in range(3):
                 c.itemconfigure(f"dot{i}", state="normal" if i < shown else "hidden")
-            if t % 6 == 0 and self.bubble_state and self.bubble_state["thinking"]:
-                self.update_thinking()
         elif t >= self.next_blink:
-            c.itemconfigure("eye_open", state="hidden")
-            c.itemconfigure("eye_closed", state="normal")
-            self.root.after(140, self.open_eyes)
+            c.itemconfigure("eye", state="hidden")
+            self.root.after(130, lambda: c.itemconfigure("eye", state="normal"))
             self.next_blink = t + random.randint(45, 110)
         self.root.after(60, self.tick)
-
-    def open_eyes(self):
-        self.canvas.itemconfigure("eye_closed", state="hidden")
-        self.canvas.itemconfigure("eye_open", state="normal")
-
-    def set_thinking_face(self, thinking):
-        c = self.canvas
-        c.itemconfigure("smile", state="hidden" if thinking else "normal")
-        c.itemconfigure("mouth_o", state="normal" if thinking else "hidden")
-        if not thinking:
-            for i in range(3):
-                c.itemconfigure(f"dot{i}", state="hidden")
 
     # ---- position ---------------------------------------------------------
 
@@ -422,10 +503,23 @@ class Buddy:
         win.overrideredirect(True)
         win.attributes("-topmost", True)
         win.configure(bg=PAPER, highlightthickness=max(1, self.px(1.5)),
-                      highlightbackground=MINT_DARK, highlightcolor=MINT_DARK)
-        self.entry = tk.Text(win, width=38, height=3, wrap="word", font=self.font, bd=0,
+                      highlightbackground=CLAY_DARK, highlightcolor=CLAY_DARK)
+        # Mode switch across the top.
+        modes = tk.Frame(win, bg=PAPER)
+        modes.pack(fill="x", padx=self.px(8), pady=(self.px(7), self.px(2)))
+        self.mode_buttons = {}
+        for key in ("ask", "do"):
+            b = tk.Label(modes, text=MODES[key]["label"], font=self.small_bold, padx=self.px(10),
+                         pady=self.px(2), cursor="hand2")
+            b.pack(side="left", padx=(0, self.px(6)))
+            b.bind("<Button-1>", lambda e, k=key: self.set_mode(k))
+            self.mode_buttons[key] = b
+        self.mode_hint = tk.Label(modes, font=self.small, fg=MUTED, bg=PAPER)
+        self.mode_hint.pack(side="left")
+
+        self.entry = tk.Text(win, width=40, height=3, wrap="word", font=self.font, bd=0,
                              relief="flat", bg=PAPER, fg=INK, insertbackground=INK,
-                             padx=self.px(10), pady=self.px(8), highlightthickness=0, undo=True)
+                             padx=self.px(10), pady=self.px(6), highlightthickness=0, undo=True)
         self.entry.pack(fill="both", expand=True)
         row = tk.Frame(win, bg=PAPER)
         row.pack(fill="x", padx=self.px(8), pady=(0, self.px(6)))
@@ -437,13 +531,22 @@ class Buddy:
         self.entry.bind("<Return>", self.submit)
         self.entry.bind("<Shift-Return>", lambda e: None)
         win.bind("<Escape>", lambda e: self.hide_input())
+        self.set_mode("ask")
+
+    def set_mode(self, mode):
+        self.mode = mode
+        for key, button in self.mode_buttons.items():
+            on = key == mode
+            button.configure(bg=SEL_ON if on else SEL_OFF, fg=PAPER if on else MUTED)
+        self.mode_hint.configure(text="quick answer, no tools" if mode == "ask"
+                                 else "full tools and your context")
 
     def link(self, parent, text, command, font=None):
-        label = tk.Label(parent, text=text, font=font or self.small, fg=MINT_DARK, bg=PAPER,
+        label = tk.Label(parent, text=text, font=font or self.small, fg=CLAY_DARK, bg=PAPER,
                          cursor="hand2")
         label.bind("<Button-1>", lambda e: command())
         label.bind("<Enter>", lambda e: label.configure(fg=INK))
-        label.bind("<Leave>", lambda e: label.configure(fg=MINT_DARK))
+        label.bind("<Leave>", lambda e: label.configure(fg=CLAY_DARK))
         return label
 
     def toggle_input(self):
@@ -452,7 +555,9 @@ class Buddy:
         else:
             self.open_input()
 
-    def open_input(self):
+    def open_input(self, mode=None):
+        if mode:
+            self.set_mode(mode)
         if self.busy:  # a question is in flight; show its bubble instead
             self.show_bubble_window()
             return
@@ -489,38 +594,55 @@ class Buddy:
         self.hide_input()
         self.busy = True
         self.request_id += 1
+        self.last_mode = self.mode
         self.started = time.monotonic()
-        self.set_thinking_face(True)
-        self.set_bubble("Thinking", thinking=True)
+        self.stream_buf = ""
+        start = "Working…" if self.mode == "do" else "Thinking…"
+        self.set_bubble(start, thinking=True)
         self.show_bubble_window()
-        threading.Thread(target=self.worker, args=(self.request_id, prompt), daemon=True).start()
+        threading.Thread(target=self.worker, args=(self.request_id, self.mode, prompt),
+                         daemon=True).start()
         return "break"
 
-    def worker(self, request_id, prompt):
+    def worker(self, request_id, mode, prompt):
+        def emit(event):
+            self.events.put((request_id, event))
         try:
-            ok, text = run_claude(self.claude, prompt, self.remember_proc)
+            stream_claude(self.claude, mode, prompt, self.remember_proc, emit)
         except Exception as exc:  # the UI must hear about every failure
             log(traceback.format_exc())
-            ok, text = False, f"Couldn't run claude: {exc}"
-        self.results.put((request_id, ok, text))
+            emit(("result", False, f"Couldn't run claude: {exc}"))
 
     def remember_proc(self, proc):
         self.proc = proc
 
-    def poll_results(self):
+    def poll_events(self):
+        grew = False
         try:
             while True:
-                request_id, ok, text = self.results.get_nowait()
-                if request_id == self.request_id and self.busy:
+                request_id, event = self.events.get_nowait()
+                if request_id != self.request_id or not self.busy:
+                    continue
+                kind = event[0]
+                if kind == "text":
+                    self.stream_buf += event[1]
+                    grew = True
+                elif kind == "tool":
+                    self.set_stream_status(f"⚙ using {event[1]}…")
+                elif kind == "result":
+                    ok, text = event[1], event[2]
                     self.busy = False
                     self.proc = None
-                    self.set_thinking_face(False)
-                    if ok:
-                        self.last_reply = text
-                    self.show_reply(text, error=not ok)
+                    final = text or self.stream_buf.strip()
+                    if ok and final:
+                        self.last_reply = final
+                    self.show_reply(final or "No reply.", error=not ok)
+                    grew = False
         except queue.Empty:
             pass
-        self.root.after(100, self.poll_results)
+        if grew and self.busy:
+            self.render_stream()
+        self.root.after(80, self.poll_events)
 
     def cancel(self):
         if not self.busy:
@@ -530,7 +652,6 @@ class Buddy:
         proc, self.proc = self.proc, None
         if proc and proc.poll() is None:
             proc.kill()
-        self.set_thinking_face(False)
 
     # ---- speech bubble ----------------------------------------------------
 
@@ -554,18 +675,22 @@ class Buddy:
         self.copy_label.pack(side="right", padx=(0, self.px(12)))
         win.bind("<Escape>", lambda e: self.close_bubble())
 
+    def bubble_text_width(self):
+        return self.px(340) - 2 * self.px(14)
+
     def set_bubble(self, text, thinking=False, error=False, status=""):
-        text_w = self.px(340) - 2 * self.px(14)
+        text_w = self.bubble_text_width()
         lines = count_wrapped_lines(text, self.font, text_w - self.px(4))
         line_h = self.font.metrics("linespace")
         text_h = min(lines * line_h, self.px(360)) + self.px(2)
-        self.bubble_state = {"thinking": thinking, "text_w": text_w, "text_h": text_h}
+        self.bubble_state = {"thinking": thinking, "text_w": text_w, "text_h": text_h,
+                             "drawn_h": text_h}
         t = self.btext
         t.configure(state="normal", fg=ERROR if error else (MUTED if thinking else INK))
         t.delete("1.0", "end")
         t.insert("1.0", text)
         t.configure(state="disabled")
-        t.yview_moveto(0)
+        t.yview_moveto(1.0 if thinking else 0.0)
         self.bstatus.configure(text=status)
         if thinking:
             self.copy_label.pack_forget()
@@ -573,6 +698,30 @@ class Buddy:
             self.copy_label.pack(side="right", padx=(0, self.px(12)))
         self.copy_label.configure(text="Copy")
         self.draw_bubble()
+
+    def render_stream(self):
+        """Show the streamed-so-far text, growing the bubble and scrolling to the end."""
+        text_w = self.bubble_text_width()
+        lines = count_wrapped_lines(self.stream_buf, self.font, text_w - self.px(4))
+        line_h = self.font.metrics("linespace")
+        text_h = min(max(lines, 1) * line_h, self.px(360)) + self.px(2)
+        s = self.bubble_state
+        s.update(thinking=False, text_w=text_w, text_h=text_h)
+        t = self.btext
+        t.configure(state="normal", fg=INK)
+        t.delete("1.0", "end")
+        t.insert("1.0", self.stream_buf)
+        t.configure(state="disabled")
+        t.yview_moveto(1.0)
+        elapsed = int(time.monotonic() - self.started)
+        self.bstatus.configure(text=f"{MODES[self.last_mode]['label']} · {elapsed}s · Esc to cancel")
+        if abs(text_h - s.get("drawn_h", 0)) >= line_h:  # only redraw geometry when it grows a line
+            s["drawn_h"] = text_h
+            self.draw_bubble()
+
+    def set_stream_status(self, text):
+        if self.bubble_state:
+            self.bstatus.configure(text=text)
 
     def draw_bubble(self):
         s = self.bubble_state
@@ -585,7 +734,7 @@ class Buddy:
         on_left, x, y = self.popup_origin(w, h)
         bx1 = 0 if on_left else tail
         bx2 = bx1 + body_w
-        mascot_mid = self.root.winfo_y() + self.px(66)
+        mascot_mid = self.root.winfo_y() + self.px(60)
         ty = min(max(mascot_mid - y, radius + self.px(10)), body_h - radius - self.px(10))
 
         c = self.bcanvas
@@ -607,19 +756,12 @@ class Buddy:
                         width=s["text_w"], height=bar)
         self.bubble.geometry(f"{w}x{h}+{x}+{y}")
 
-    def update_thinking(self):
-        dots = "." * ((self.tick_count // 6) % 4)
-        elapsed = int(time.monotonic() - self.started)
-        t = self.btext
-        t.configure(state="normal")
-        t.delete("1.0", "end")
-        t.insert("1.0", "Thinking" + dots)
-        t.configure(state="disabled")
-        self.bstatus.configure(text=f"Asking Claude · {elapsed}s · Esc to cancel")
-
     def show_reply(self, text, error=False):
         elapsed = time.monotonic() - self.started if self.started else 0
-        status = "Something went wrong" if error else f"Claude · {elapsed:.0f}s"
+        if error:
+            status = "Something went wrong"
+        else:
+            status = f"{MODES[self.last_mode]['verb']} · {elapsed:.0f}s"
         self.set_bubble(text, error=error, status=status)
         self.show_bubble_window()
 
@@ -656,8 +798,10 @@ class Buddy:
 
     def build_menu(self):
         m = self.menu = tk.Menu(self.root, tearoff=False)
-        m.add_command(label="Ask Claude…", command=self.open_input)
+        m.add_command(label="Ask Claude…", command=lambda: self.open_input("ask"))
+        m.add_command(label="Do it (full tools)…", command=lambda: self.open_input("do"))
         m.add_command(label="Dictate (Win+H)", command=self.start_dictation)
+        m.add_separator()
         m.add_command(label="Show last reply", command=self.show_bubble_window)
         m.add_command(label="Copy last reply", command=self.copy_last_reply)
         m.add_separator()

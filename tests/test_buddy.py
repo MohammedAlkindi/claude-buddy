@@ -1,5 +1,6 @@
 import importlib.machinery
 import importlib.util
+import json
 import os
 import sys
 import unittest
@@ -42,28 +43,68 @@ class ClaudeEnv(unittest.TestCase):
             self.assertEqual(buddy.claude_env(), {"PATH": "p", "CLAUDE_CONFIG_DIR": "d"})
 
 
-class RunClaude(unittest.TestCase):
-    """run_claude against a stand-in executable, so no real Claude call is made."""
+class ParseStreamLine(unittest.TestCase):
+    def text_delta(self, s):
+        return json.dumps({"type": "stream_event",
+                           "event": {"type": "content_block_delta",
+                                     "delta": {"type": "text_delta", "text": s}}})
 
-    def run_with(self, script):
-        started = []
-        with mock.patch.object(buddy, "CLAUDE_ARGS", ["-c", script]):
-            result = buddy.run_claude(sys.executable, "hi there", started.append)
+    def test_text_delta_yields_text(self):
+        self.assertEqual(buddy.parse_stream_line(self.text_delta("hi ")), [("text", "hi ")])
+
+    def test_tool_start_yields_tool_name(self):
+        line = json.dumps({"type": "stream_event",
+                           "event": {"type": "content_block_start",
+                                     "content_block": {"type": "tool_use", "name": "Bash"}}})
+        self.assertEqual(buddy.parse_stream_line(line), [("tool", "Bash")])
+
+    def test_result_success(self):
+        line = json.dumps({"type": "result", "is_error": False, "result": "done"})
+        self.assertEqual(buddy.parse_stream_line(line), [("result", True, "done")])
+
+    def test_result_error(self):
+        line = json.dumps({"type": "result", "is_error": True, "result": "boom"})
+        self.assertEqual(buddy.parse_stream_line(line), [("result", False, "boom")])
+
+    def test_noise_and_blank_and_bad_json_are_ignored(self):
+        self.assertEqual(buddy.parse_stream_line(""), [])
+        self.assertEqual(buddy.parse_stream_line("not json"), [])
+        self.assertEqual(buddy.parse_stream_line(json.dumps({"type": "system"})), [])
+        # A thinking delta is not shown in the bubble.
+        thinking = json.dumps({"type": "stream_event",
+                               "event": {"type": "content_block_delta",
+                                         "delta": {"type": "thinking_delta", "thinking": "hm"}}})
+        self.assertEqual(buddy.parse_stream_line(thinking), [])
+
+
+class StreamClaude(unittest.TestCase):
+    """stream_claude against a stand-in executable that prints stream-json lines."""
+
+    def run_script(self, script, mode="ask"):
+        events, started = [], []
+        conf = {"label": "T", "args": ["-c", script], "cwd": os.getcwd(),
+                "timeout": 60, "verb": "T"}
+        with mock.patch.dict(buddy.MODES, {mode: conf}):
+            buddy.stream_claude(sys.executable, mode, "a prompt", started.append, events.append)
         self.assertEqual(len(started), 1)
-        return result
+        return events
 
-    def test_reply_comes_from_stdout_with_prompt_on_stdin(self):
-        ok, text = self.run_with("import sys; print(sys.stdin.read().upper())")
-        self.assertEqual((ok, text), (True, "HI THERE"))
+    def test_streams_deltas_then_result(self):
+        script = (
+            "import json,sys; sys.stdin.read();"
+            "d=lambda s: print(json.dumps({'type':'stream_event','event':"
+            "{'type':'content_block_delta','delta':{'type':'text_delta','text':s}}}));"
+            "d('Hel'); d('lo');"
+            "print(json.dumps({'type':'result','is_error':False,'result':'Hello'}))"
+        )
+        events = self.run_script(script)
+        self.assertEqual(events,
+                         [("text", "Hel"), ("text", "lo"), ("result", True, "Hello")])
 
-    def test_failure_reports_stderr(self):
-        ok, text = self.run_with("import sys; sys.stderr.write('not logged in'); sys.exit(1)")
-        self.assertEqual((ok, text), (False, "not logged in"))
-
-    def test_empty_reply_is_an_error(self):
-        ok, text = self.run_with("pass")
-        self.assertFalse(ok)
-        self.assertIn("exited with code 0", text)
+    def test_crash_without_result_reports_stderr(self):
+        script = "import sys; sys.stdin.read(); sys.stderr.write('not logged in'); sys.exit(1)"
+        events = self.run_script(script)
+        self.assertEqual(events, [("result", False, "not logged in")])
 
 
 class RoundRect(unittest.TestCase):
