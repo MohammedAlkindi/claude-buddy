@@ -36,25 +36,37 @@ from pathlib import Path
 APP_DIR = Path.home() / ".local" / "state" / "claude-buddy"
 STATE_FILE = APP_DIR / "state.json"
 LOG_FILE = APP_DIR / "buddy.log"
+# A local rolling log of recent exchanges, so Pip keeps continuity and does not
+# re-ask what it just learned. His own machine only; never synced anywhere.
+HISTORY_FILE = APP_DIR / "history.jsonl"
+HISTORY_KEEP = 6
+HISTORY_REPLY_CHARS = 500
 
-GITHUB_DIR = Path.home() / "Github"  # where dotgithub CLAUDE.md lives, for Do-it context
+GITHUB_DIR = Path.home() / "Github"  # dotgithub checkout: his CLAUDE.md and brain, for Do-it
 
 # Flags shared by both modes: stream the reply as it is generated.
 STREAM_ARGS = ["-p", "--output-format", "stream-json", "--include-partial-messages",
                "--verbose", "--no-session-persistence"]
 
 ASK_SYSTEM = ("You are answering inside a small desktop speech bubble. Keep replies short "
-              "and write plain text, no Markdown. You have no tools; just answer.")
-DO_SYSTEM = ("You are Mohammed's desktop assistant, answering from a small speech bubble with "
-             "full tools, his connectors, and his dotgithub context. Do what he asks, then "
+              "and write plain text, no Markdown. You have no tools; just answer. Recent "
+              "exchanges may be included for continuity, which carry across questions, so use "
+              "them and don't say you can't remember.")
+DO_SYSTEM = ("You are Mohammed's personal intelligence, answering from a small speech bubble with "
+             "full tools, his connectors, and his dotgithub second brain. You run inside his "
+             "dotgithub checkout: read knowledge/me/profile.md and knowledge/me/facts.md for who "
+             "he is, his projects, and his preferences, and never re-ask what they already answer. "
+             "Do what he asks, then "
              "report the result in a few plain-text sentences, no Markdown. His documents live "
              "in Google Drive; use the Google Drive connector to find and read them. For anything "
              "on a website, use Claude in Chrome, his real signed-in browser: load the "
              "mcp__claude-in-chrome__* tools with ToolSearch, then act in his existing sessions. "
              "Never try to hide the automation from a site, bypass a sign-in, or defeat a bot "
              "check. Do not take irreversible or outward actions he did not ask for: no deleting, "
-             "no force-push, no sending messages or posting, no spending. When a task is "
-             "ambiguous, do the safest useful version and say what you did.")
+             "no force-push, no sending messages or posting, no spending. Recent exchanges may "
+             "be included for continuity, which carry across questions, so use them and don't "
+             "say you can't remember. When a task is ambiguous, do the safest useful version "
+             "and say what you did.")
 
 MODES = {
     # Ask: no tools, no context load, safe by construction. Fast.
@@ -81,7 +93,7 @@ KEY = "#ff00ff"  # transparent color key; never used in the drawing
 CLAY = "#d97757"  # Claude terracotta
 CLAY_DARK = "#b85c3c"
 CLAY_SHEEN = "#e79a80"
-EYE = "#1f1a17"
+EYE = "#faf1ec"  # knockout eyes, like the Claude Code mascot
 INK = "#2b2622"
 PAPER = "#ffffff"
 PAPER_EDGE = "#e4d8d0"
@@ -91,18 +103,19 @@ ERROR = "#b3261e"
 SEL_ON = CLAY
 SEL_OFF = "#efe6e0"
 
-# Pixel grid for the mascot: '#' clay body, 'o' eye, '.' empty.
+# Pixel grid for the mascot, matching the Claude Code bug: wide flat body with
+# two side arms, knockout eyes, and four legs. '#' clay body, 'o' eye, '.' empty.
 MASCOT = [
-    "....####....",
-    "..########..",
-    ".##########.",
-    "############",
-    "###oo##oo###",
-    "###oo##oo###",
-    "############",
-    "############",
-    ".##########.",
-    "..##....##..",
+    "....#######....",
+    "..###########..",
+    "..###########..",
+    "..##oo###oo##..",
+    "..###########..",
+    "###############",
+    "..###########..",
+    "..###########..",
+    "..##.##.##.##..",
+    "..##.##.##.##..",
 ]
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -192,6 +205,45 @@ def session_launch_command(exe, has_wt, cwd):
     if has_wt:
         return ["wt", "-d", cwd, exe]
     return ["cmd", "/c", "start", "Claude Code", "cmd", "/k", exe]
+
+
+def load_recent_history(n=HISTORY_KEEP):
+    try:
+        lines = HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines[-n:]:
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            pass
+    return out
+
+
+def append_history(mode, prompt, reply):
+    try:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        entry = {"ts": time.strftime("%Y-%m-%d %H:%M"), "mode": mode,
+                 "prompt": prompt, "reply": reply[:HISTORY_REPLY_CHARS]}
+        with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError as exc:
+        log(f"could not save history: {exc}")
+
+
+def build_prompt(history, user_prompt):
+    """Prepend recent exchanges so Pip keeps continuity across questions."""
+    if not history:
+        return user_prompt
+    lines = ["[Context from earlier in this ongoing conversation with Mohammed, oldest first. "
+             "Use it for continuity and do not re-ask what is already answered.]"]
+    for entry in history:
+        lines.append(f"Mohammed: {entry.get('prompt', '')}")
+        lines.append(f"You: {entry.get('reply', '')}")
+    lines.append("")
+    lines.append(f"Mohammed now says: {user_prompt}")
+    return "\n".join(lines)
 
 
 def parse_stream_line(line):
@@ -307,6 +359,7 @@ class Buddy:
         self.request_id = 0
         self.started = 0.0
         self.stream_buf = ""
+        self.pending_prompt = ""
         self.last_reply = ""
         self.last_mode = "ask"
         self.bubble_state = None
@@ -352,12 +405,8 @@ class Buddy:
                                     bg=KEY, highlightthickness=0, bd=0)
         c.pack()
 
-        cell = self.px(6)
-        ox, oy = self.px(14), self.px(26)
-        # Quote marks above the head, in the Claude style.
-        for qx in (self.px(34), self.px(46)):
-            c.create_rectangle(qx, self.px(8), qx + self.px(5), self.px(18),
-                               fill=CLAY, outline="", tags="body")
+        cell = self.px(5)
+        ox, oy = self.px(14), self.px(32)
         for r, row in enumerate(MASCOT):
             for col, ch in enumerate(row):
                 if ch == ".":
@@ -367,13 +416,13 @@ class Buddy:
                 tags = ("body", "hit", "eye") if ch == "o" else ("body", "hit")
                 c.create_rectangle(x, y, x + cell, y + cell, fill=color, outline="", tags=tags)
         # A soft sheen block, top-left of the body.
-        c.create_rectangle(ox + cell, oy + cell, ox + 3 * cell, oy + 2 * cell,
+        c.create_rectangle(ox + 3 * cell, oy + cell, ox + 5 * cell, oy + 2 * cell,
                            fill=CLAY_SHEEN, outline="", tags=("body", "hit"))
-        c.tag_lower("body")  # keep sheen under eyes/edges where they overlap
+        c.tag_lower("body")  # keep sheen under eyes where they overlap
         # Thinking dots, hidden until busy.
         for i in range(3):
-            bx = ox + (3 + i * 2) * cell
-            c.create_rectangle(bx, self.px(2), bx + cell, self.px(2) + cell,
+            bx = ox + (5 + i * 2) * cell
+            c.create_rectangle(bx, self.px(12), bx + cell, self.px(12) + cell,
                                fill=CLAY_DARK, outline="", state="hidden", tags=("body", f"dot{i}"))
 
         self.add_button("pencil", 104, 24, "")
@@ -448,8 +497,8 @@ class Buddy:
             for i in range(3):
                 c.itemconfigure(f"dot{i}", state="normal" if i < shown else "hidden")
         elif t >= self.next_blink:
-            c.itemconfigure("eye", state="hidden")
-            self.root.after(130, lambda: c.itemconfigure("eye", state="normal"))
+            c.itemconfigure("eye", fill=CLAY)  # knockout eyes blink by filling with body color
+            self.root.after(130, lambda: c.itemconfigure("eye", fill=EYE))
             self.next_blink = t + random.randint(45, 110)
         self.root.after(60, self.tick)
 
@@ -622,10 +671,12 @@ class Buddy:
         self.last_mode = self.mode
         self.started = time.monotonic()
         self.stream_buf = ""
+        self.pending_prompt = prompt
+        full = build_prompt(load_recent_history(), prompt)  # prepend recent exchanges for continuity
         start = "Working…" if self.mode == "do" else "Thinking…"
         self.set_bubble(start, thinking=True)
         self.show_bubble_window()
-        threading.Thread(target=self.worker, args=(self.request_id, self.mode, prompt),
+        threading.Thread(target=self.worker, args=(self.request_id, self.mode, full),
                          daemon=True).start()
         return "break"
 
@@ -661,6 +712,7 @@ class Buddy:
                     final = text or self.stream_buf.strip()
                     if ok and final:
                         self.last_reply = final
+                        append_history(self.last_mode, self.pending_prompt, final)
                     self.show_reply(final or "No reply.", error=not ok)
                     grew = False
         except queue.Empty:

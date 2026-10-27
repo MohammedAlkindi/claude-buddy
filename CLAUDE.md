@@ -17,6 +17,12 @@ Both are defined in `MODES`; change flags there, not scattered through the code.
 
 Do-it finds documents through the Google Drive connector (his docs live in Drive). The right-click menu's **New Claude Code session** opens a fresh interactive `claude` in Windows Terminal (or a console), built by the pure `session_launch_command()`.
 
+## Personal intelligence
+This is his personal "second brain" widget, not a generic wrapper.
+- **Knows him:** Do-it runs inside his dotgithub checkout (`~/Github`), and its prompt points it at `knowledge/me/profile.md` and `knowledge/me/facts.md` so it already knows who he is and doesn't re-ask.
+- **Remembers:** every successful exchange is appended to `~/.local/state/claude-buddy/history.jsonl`; `build_prompt()` prepends the last `HISTORY_KEEP` exchanges to the next prompt, so both modes keep continuity across a fresh `claude -p` each time. Local only, never synced.
+- **Not yet built (needs his call):** writing durable learnings back into the dotgithub brain. `~/Github` is the shared primary checkout with strict write rules (concurrency, sourced facts, commit gate), so Pip reads the brain but does not auto-write it. "Remember this about me" → a deliberate, sourced `facts.md` line, not silent learning.
+
 ## Rules
 - No hardcoded secrets or API keys anywhere. Claude calls go through the `claude` CLI login; `claude_env()` strips API keys so calls never bill per token.
 - The only external call is `stream_claude()`; it emits `("text", ...)`, `("tool", name)`, `("result", ok, text)` events and never raises to the UI. `parse_stream_line()` turns one stream-json line into those events.

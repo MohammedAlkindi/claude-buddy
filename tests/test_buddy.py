@@ -136,6 +136,29 @@ class SessionLaunch(unittest.TestCase):
         self.assertEqual(buddy.session_launch_command(None, True, "C:\\")[-1], "claude")
 
 
+class HistoryMemory(unittest.TestCase):
+    def test_build_prompt_passthrough_when_empty(self):
+        self.assertEqual(buddy.build_prompt([], "hello"), "hello")
+
+    def test_build_prompt_includes_prior_exchanges(self):
+        history = [{"prompt": "what is my name", "reply": "Mohammed"}]
+        out = buddy.build_prompt(history, "and my school?")
+        self.assertIn("Mohammed", out)
+        self.assertTrue(out.rstrip().endswith("and my school?"))
+
+    def test_append_and_load_roundtrip_truncates_long_replies(self):
+        import pathlib
+        import tempfile
+        d = pathlib.Path(tempfile.mkdtemp())
+        with mock.patch.object(buddy, "APP_DIR", d), \
+                mock.patch.object(buddy, "HISTORY_FILE", d / "history.jsonl"):
+            buddy.append_history("ask", "q1", "r1")
+            buddy.append_history("do", "q2", "x" * 900)
+            rows = buddy.load_recent_history(5)
+        self.assertEqual([r["prompt"] for r in rows], ["q1", "q2"])
+        self.assertLessEqual(len(rows[1]["reply"]), buddy.HISTORY_REPLY_CHARS)
+
+
 class RoundRect(unittest.TestCase):
     def test_corners_stay_inside_the_box(self):
         points = buddy.round_rect(0, 0, 100, 50, 10)
