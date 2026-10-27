@@ -11,7 +11,7 @@ Python 3 (Windows 11 only): one `tkinter` file, `buddy.pyw`, standard library on
 ## Modes
 The pencil has two modes, chosen in the input box. Both stream the reply.
 - **Ask** (default): `claude --safe-mode --tools ""` — no tools, no context load, cannot touch files or accounts. Fast quick answers.
-- **Do it**: `claude --permission-mode bypassPermissions --add-dir ~/Github`, cwd `~/Github` — full tools, connectors, and dotgithub context, running unattended. It can change things on the machine, so it is never the default. The system prompt tells it to avoid irreversible/outward actions it was not asked for.
+- **Do it**: `claude --permission-mode bypassPermissions --chrome --add-dir ~/Github`, cwd `~/Github` — full tools, connectors, dotgithub context, and Claude in Chrome (his real signed-in browser) for website tasks, running unattended. It can change things on the machine, so it is never the default. The system prompt tells it to use Claude in Chrome for web work, never to hide the automation or bypass sign-ins/bot checks, and to avoid irreversible/outward actions it was not asked for.
 
 Both are defined in `MODES`; change flags there, not scattered through the code.
 

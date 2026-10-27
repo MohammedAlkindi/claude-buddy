@@ -107,6 +107,21 @@ class StreamClaude(unittest.TestCase):
         self.assertEqual(events, [("result", False, "not logged in")])
 
 
+class ModeWiring(unittest.TestCase):
+    def test_ask_is_tool_free_and_browserless(self):
+        args = buddy.MODES["ask"]["args"]
+        self.assertIn("--safe-mode", args)
+        self.assertIn("--tools", args)
+        self.assertNotIn("--chrome", args)
+        self.assertNotIn("--permission-mode", args)
+
+    def test_do_has_chrome_and_full_permissions(self):
+        args = buddy.MODES["do"]["args"]
+        self.assertIn("--chrome", args)
+        self.assertEqual(args[args.index("--permission-mode") + 1], "bypassPermissions")
+        self.assertNotIn("--safe-mode", args)
+
+
 class RoundRect(unittest.TestCase):
     def test_corners_stay_inside_the_box(self):
         points = buddy.round_rect(0, 0, 100, 50, 10)

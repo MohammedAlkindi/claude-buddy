@@ -47,10 +47,13 @@ ASK_SYSTEM = ("You are answering inside a small desktop speech bubble. Keep repl
               "and write plain text, no Markdown. You have no tools; just answer.")
 DO_SYSTEM = ("You are Mohammed's desktop assistant, answering from a small speech bubble with "
              "full tools, his connectors, and his dotgithub context. Do what he asks, then "
-             "report the result in a few plain-text sentences, no Markdown. Do not take "
-             "irreversible or outward actions he did not ask for: no deleting, no force-push, "
-             "no sending messages or posting, no spending. When a task is ambiguous, do the "
-             "safest useful version and say what you did.")
+             "report the result in a few plain-text sentences, no Markdown. For anything on a "
+             "website, use Claude in Chrome, his real signed-in browser: load the "
+             "mcp__claude-in-chrome__* tools with ToolSearch, then act in his existing sessions. "
+             "Never try to hide the automation from a site, bypass a sign-in, or defeat a bot "
+             "check. Do not take irreversible or outward actions he did not ask for: no deleting, "
+             "no force-push, no sending messages or posting, no spending. When a task is "
+             "ambiguous, do the safest useful version and say what you did.")
 
 MODES = {
     # Ask: no tools, no context load, safe by construction. Fast.
@@ -61,10 +64,11 @@ MODES = {
         "timeout": 300,
         "verb": "Claude",
     },
-    # Do it: full tools and connectors, dotgithub context, runs unattended.
+    # Do it: full tools and connectors, dotgithub context, and Claude in Chrome
+    # (his real signed-in browser) for website tasks. Runs unattended.
     "do": {
         "label": "Do it",
-        "args": STREAM_ARGS + ["--permission-mode", "bypassPermissions",
+        "args": STREAM_ARGS + ["--permission-mode", "bypassPermissions", "--chrome",
                                "--add-dir", str(GITHUB_DIR), "--append-system-prompt", DO_SYSTEM],
         "cwd": str(GITHUB_DIR) if GITHUB_DIR.exists() else str(Path.home()),
         "timeout": 1800,
