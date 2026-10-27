@@ -6,8 +6,8 @@ Pip is a small mascot that floats on top of your Windows desktop, even over Zoom
 ## Architecture
 Everything lives in one file, `buddy.pyw`, which uses Python's built-in `tkinter`. No packages to install.
 
-- **Mascot window:** a frameless, always-on-top window with a transparent background. Pip is drawn on a canvas. Drag Pip to move it. The position is saved to `~\.local\state\claude-buddy\state.json`.
-- **Asking Claude:** each question runs `claude -p` (the Claude Code CLI) on a background thread, so the window never freezes. It uses your Claude login. API keys are removed from the CLI's environment, so you are never billed per call. `--safe-mode` and `--tools ""` keep it a fast, chat-only call. Change `CLAUDE_ARGS` at the top of the file to adjust this.
+- **Mascot window:** a frameless, always-on-top window with a transparent background. Pip has a rounded terracotta hood, a dark terminal face, and a little hoodie. Canvas-drawn animation includes breathing, blinking, greetings, thinking, working, dragging, and brief success/error reactions. Drag Pip to move it. The position is saved to `~\.local\state\claude-buddy\state.json`.
+- **Asking Claude:** each question runs `claude -p` (the Claude Code CLI) on a background thread, so the window never freezes. It uses your Claude login. Ask mode uses `--safe-mode` and `--tools ""` for chat; Do it enables tools. Change `MODES` near the top of the file to adjust flags and timeouts. The deadline covers the whole streaming request, including a silent process or blocked prompt input. Thinking dots disappear after completion or cancellation.
 - **Speech bubble:** shows the reply with Copy and Close buttons. Esc closes it, and also cancels a question that is still running.
 - **Mic:** opens the text box, focuses it, and presses Win+H for Windows voice typing.
 - **Right-click Pip:** Ask, Dictate, Show or Copy the last reply, Reset position, Quit.

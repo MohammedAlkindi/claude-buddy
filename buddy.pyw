@@ -18,7 +18,6 @@ import json
 import math
 import os
 import queue
-import random
 import shutil
 import subprocess
 import sys
@@ -112,20 +111,28 @@ ERROR = "#b3261e"
 SEL_ON = CLAY
 SEL_OFF = "#efe6e0"
 
-# Pixel grid for the mascot, matching the Claude Code bug: wide flat body with
-# two side arms, knockout eyes, and four legs. '#' clay body, 'o' eye, '.' empty.
-MASCOT = [
-    "....#######....",
-    "..###########..",
-    "..###########..",
-    "..##oo###oo##..",
-    "..###########..",
-    "###############",
-    "..###########..",
-    "..###########..",
-    "..##.##.##.##..",
-    "..##.##.##.##..",
-]
+PET_OUTLINE = "#462c29"
+PET_SHADOW = "#b85c3c"
+PET_LIGHT = "#eeaa8c"
+PET_SCREEN = "#342c32"
+PET_SCREEN_EDGE = "#75483f"
+
+
+def pet_pose(frame, activity="idle"):
+    """Deterministic animation in logical pixels, independent of Tk and DPI."""
+    phase = frame * 0.12
+    wave = activity == "happy" or (activity == "idle" and frame % 240 >= 205)
+    blink = frame % 83 in (0, 1)
+    return {
+        "bob": round(math.sin(phase) * 2),
+        "lean": round(math.sin(phase * 0.5)) if activity == "idle" else 0,
+        "arm": round(math.sin(phase * 3) * 3) if wave or activity == "working" else 0,
+        "wave": wave,
+        "blink": blink and activity not in ("thinking", "error"),
+        "look": 2 if activity == "thinking" else (frame // 80 % 3 - 1),
+        "hop": -round(abs(math.sin(phase * 1.8)) * 5) if activity == "happy" else 0,
+        "feet": round(math.sin(phase * 2) * 2) if activity in ("working", "dragging") else 0,
+    }
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -328,36 +335,59 @@ def stream_claude(exe, mode, prompt, on_start, emit):
         env=claude_env(), cwd=conf["cwd"],
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
+    deadline = time.monotonic() + conf["timeout"]
     on_start(proc)
-
+    output = queue.Queue()
     stderr_chunks = []
-    drain = threading.Thread(target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True)
-    drain.start()
+    def read_output():
+        try:
+            for line in proc.stdout:
+                output.put(line)
+        finally:
+            output.put(None)
 
+    def write_prompt():
+        try:
+            proc.stdin.write(prompt)
+        except OSError:
+            pass
+        finally:
+            proc.stdin.close()
+
+    readers = [threading.Thread(target=read_output, daemon=True),
+               threading.Thread(target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True),
+               threading.Thread(target=write_prompt, daemon=True)]
+    for thread in readers:
+        thread.start()
+    result = None
     try:
-        proc.stdin.write(prompt)
-        proc.stdin.close()
-    except OSError:
-        pass
-
-    saw_result = False
-    for line in proc.stdout:
-        for event in parse_stream_line(line):
-            if event[0] == "result":
-                saw_result = True
-            emit(event)
-
-    try:
-        proc.wait(timeout=conf["timeout"])
-    except subprocess.TimeoutExpired:
+        while True:
+            # The deadline applies while reading stdout AND writing stdin, even
+            # if Claude goes silent or never reads its prompt.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise queue.Empty
+            line = output.get(timeout=remaining)
+            if line is None:
+                break
+            for event in parse_stream_line(line):
+                if event[0] == "result":
+                    result = event
+                else:
+                    emit(event)
+        proc.wait(timeout=max(0, deadline - time.monotonic()))
+    except (queue.Empty, subprocess.TimeoutExpired):
         proc.kill()
+        proc.wait()
         emit(("result", False, f"That took longer than {conf['timeout'] // 60} minutes, so I stopped it."))
         return
-
-    if not saw_result:
-        drain.join(timeout=1)
-        err = "".join(c for c in stderr_chunks if c).strip()
-        emit(("result", False, err or f"claude exited with code {proc.returncode}"))
+    finally:
+        for thread in readers:
+            thread.join(timeout=1)
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            pipe.close()
+    err = "".join(c for c in stderr_chunks if c).strip()
+    emit(result or ("result", False, err or f"claude exited with code {proc.returncode}"))
 
 
 def count_wrapped_lines(text, font, width):
@@ -406,8 +436,9 @@ class Buddy:
         self.bubble_state = None
         self.press = None
         self.tick_count = 0
-        self.bob = 0
-        self.next_blink = 40
+        self.activity = "idle"
+        self.reaction_until = 0.0
+        self.reaction = "happy"
 
         families = set(tkfont.families(self.root))
         icon_family = "Segoe Fluent Icons" if "Segoe Fluent Icons" in families else "Segoe MDL2 Assets"
@@ -441,33 +472,20 @@ class Buddy:
         root.attributes("-topmost", True)
         root.attributes("-transparentcolor", KEY)
         root.configure(bg=KEY)
-        self.width, self.height = self.px(140), self.px(104)
+        self.width, self.height = self.px(158), self.px(148)
         c = self.canvas = tk.Canvas(root, width=self.width, height=self.height,
                                     bg=KEY, highlightthickness=0, bd=0)
         c.pack()
 
-        cell = self.px(5)
-        ox, oy = self.px(14), self.px(32)
-        for r, row in enumerate(MASCOT):
-            for col, ch in enumerate(row):
-                if ch == ".":
-                    continue
-                x, y = ox + col * cell, oy + r * cell
-                color = EYE if ch == "o" else CLAY
-                tags = ("body", "hit", "eye") if ch == "o" else ("body", "hit")
-                c.create_rectangle(x, y, x + cell, y + cell, fill=color, outline="", tags=tags)
-        # A soft sheen block, top-left of the body.
-        c.create_rectangle(ox + 3 * cell, oy + cell, ox + 5 * cell, oy + 2 * cell,
-                           fill=CLAY_SHEEN, outline="", tags=("body", "hit"))
-        c.tag_lower("body")  # keep sheen under eyes where they overlap
+        self.draw_pet("idle")
         # Thinking dots, hidden until busy.
         for i in range(3):
-            bx = ox + (5 + i * 2) * cell
-            c.create_rectangle(bx, self.px(12), bx + cell, self.px(12) + cell,
-                               fill=CLAY_DARK, outline="", state="hidden", tags=("body", f"dot{i}"))
+            bx = self.px(47 + i * 10)
+            c.create_rectangle(bx, self.px(6), bx + self.px(4), self.px(10),
+                               fill=CLAY_DARK, outline="", state="hidden", tags=(f"dot{i}",))
 
-        self.add_button("pencil", 104, 24, "")
-        self.add_button("mic", 104, 60, "")
+        self.add_button("pencil", 124, 53, "")
+        self.add_button("mic", 124, 89, "")
 
         c.tag_bind("hit", "<Enter>", lambda e: c.configure(cursor="fleur"))
         c.tag_bind("hit", "<Leave>", lambda e: c.configure(cursor=""))
@@ -476,6 +494,78 @@ class Buddy:
         c.bind("<ButtonRelease-1>", self.on_release)
         c.bind("<Button-3>", self.show_menu)
         root.bind("<Escape>", lambda e: self.close_bubble())
+
+    def draw_pet(self, activity):
+        """Layered pixel silhouette with independently moving face and limbs.
+
+        Canvas-native artwork stays crisp at any DPI and needs no image library.
+        Only pet-tagged items are replaced; controls and thinking dots persist.
+        """
+        c = self.canvas
+        c.delete("pet")
+        pose = pet_pose(self.tick_count, activity)
+        dx, dy = pose["lean"], pose["bob"] + pose["hop"]
+
+        def poly(points, color, outline=PET_OUTLINE, width=2):
+            coords = [(v + (dx if i % 2 == 0 else dy)) * self.scale
+                      for i, v in enumerate(points)]
+            return c.create_polygon(*coords, fill=color, outline=outline,
+                                    width=self.px(width), joinstyle="miter", tags=("pet", "hit"))
+
+        def rect(x1, y1, x2, y2, color):
+            return poly([x1, y1, x2, y1, x2, y2, x1, y2], color, "", 0)
+
+        # Boots behind the tunic, opposite motion while working or being carried.
+        f = pose["feet"]
+        poly([42, 112, 54, 112, 54, 128+f, 48, 136+f, 38, 136+f, 35, 131+f], CLAY)
+        poly([65, 112, 77, 112, 81, 126-f, 76, 133-f, 66, 133-f, 62, 127-f], PET_SHADOW)
+        rect(39, 129+f, 47, 132+f, PET_LIGHT)
+        # Mittens: a periodic greeting, typing while working, or raised on drag.
+        left = -4 if activity == "dragging" else pose["arm"]
+        right = -13 + pose["arm"] if pose["wave"] else -left
+        poly([37, 86, 29, 90+left, 20, 85+left, 15, 87+left, 14, 94+left,
+              20, 100+left, 31, 102+left, 41, 96], CLAY)
+        poly([82, 85, 90, 90+right, 99, 85+right, 105, 87+right, 106, 94+right,
+              99, 100+right, 89, 101+right, 79, 95], CLAY)
+        # Little hoodie with an illuminated terminal mark.
+        poly([43, 86, 75, 86, 82, 96, 80, 112, 71, 121, 48, 121, 39, 111, 38, 98], CLAY)
+        poly([41, 99, 48, 114, 73, 114, 79, 105, 77, 115, 70, 121, 49, 121, 40, 112],
+             PET_SHADOW, "", 0)
+        rect(47, 96, 72, 99, CLAY_SHEEN)
+        poly([51, 102, 55, 102, 60, 107, 55, 112, 51, 112, 56, 107], EYE, "", 0)
+        rect(63, 110, 70, 112, EYE)
+        # Rounded, scalloped hood: stepped edges match the reference's pixel art.
+        hood = [19, 48, 23, 37, 30, 37, 30, 29, 40, 29, 44, 23, 55, 21,
+                61, 24, 68, 21, 78, 23, 83, 29, 92, 31, 92, 38, 99, 41,
+                103, 51, 103, 70, 99, 80, 92, 87, 81, 92, 40, 92,
+                29, 88, 22, 80, 18, 68, 18, 54]
+        poly(hood, CLAY)
+        poly([20, 61, 25, 74, 32, 82, 44, 86, 83, 86, 95, 78, 102, 64,
+              99, 80, 91, 87, 81, 92, 40, 92, 29, 88, 22, 80, 18, 68],
+             PET_SHADOW, "", 0)
+        poly([25, 48, 29, 40, 35, 40, 35, 33, 45, 32, 49, 27, 56, 26,
+              59, 29, 48, 32, 44, 37, 35, 38, 33, 46], PET_LIGHT, "", 0)
+        # Deep face panel with warm rim and a small reflected highlight.
+        poly([42, 46, 79, 46, 86, 52, 87, 74, 81, 81, 42, 81, 36, 75, 36, 53], PET_SCREEN_EDGE)
+        poly([43, 49, 78, 49, 83, 53, 84, 73, 79, 77, 43, 77, 40, 73, 40, 54],
+             PET_SCREEN, "", 0)
+        rect(45, 50, 66, 52, "#514047")
+        look = pose["look"]
+        if pose["blink"]:
+            rect(46, 65, 54, 67, EYE)
+            rect(66, 65, 75, 67, EYE)
+        elif activity == "error":
+            rect(48, 58, 51, 66, EYE)
+            rect(48, 69, 51, 72, EYE)
+            rect(67, 63, 76, 66, EYE)
+        elif activity == "happy":
+            for x in (46, 66):
+                poly([x, 65, x+4, 60, x+8, 65, x+8, 69, x+4, 65, x, 69], EYE, "", 0)
+        else:
+            poly([46+look, 57, 50+look, 57, 56+look, 63, 50+look, 69,
+                  46+look, 69, 51+look, 63], EYE, "", 0)
+            rect(66+look, 66, 77+look, 69, EYE)
+        c.tag_lower("pet")
 
     def add_button(self, name, x, y, glyph):
         c = self.canvas
@@ -529,18 +619,18 @@ class Buddy:
         self.tick_count += 1
         t = self.tick_count
         c = self.canvas
-        offset = round(math.sin(t * 0.1) * self.px(2))
-        if offset != self.bob:
-            c.move("body", 0, offset - self.bob)
-            self.bob = offset
-        if self.busy:
-            shown = (t // 5) % 4
-            for i in range(3):
-                c.itemconfigure(f"dot{i}", state="normal" if i < shown else "hidden")
-        elif t >= self.next_blink:
-            c.itemconfigure("eye", fill=CLAY)  # knockout eyes blink by filling with body color
-            self.root.after(130, lambda: c.itemconfigure("eye", fill=EYE))
-            self.next_blink = t + random.randint(45, 110)
+        activity = "idle"
+        if self.press and self.press["dragged"]:
+            activity = "dragging"
+        elif self.busy:
+            activity = self.activity
+        elif time.monotonic() < self.reaction_until:
+            activity = self.reaction
+        self.draw_pet(activity)
+        # Always reset all three: a result/cancel can arrive at any dot phase.
+        shown = (t // 5) % 4 if self.busy else 0
+        for i in range(3):
+            c.itemconfigure(f"dot{i}", state="normal" if i < shown else "hidden")
         self.root.after(60, self.tick)
 
     # ---- position ---------------------------------------------------------
@@ -727,6 +817,7 @@ class Buddy:
                             f"Read it with the Read tool, then answer: {prompt}")
             self.attach_screen = None
         self.busy = True
+        self.activity = "thinking"
         self.request_id += 1
         self.last_mode = self.mode
         self.started = time.monotonic()
@@ -765,6 +856,7 @@ class Buddy:
                     self.stream_buf += event[1]
                     grew = True
                 elif kind == "tool":
+                    self.activity = "working"
                     self.set_stream_status(f"⚙ using {event[1]}…")
                 elif kind == "result":
                     ok, text = event[1], event[2]
@@ -895,6 +987,8 @@ class Buddy:
         self.bubble.geometry(f"{w}x{h}+{x}+{y}")
 
     def show_reply(self, text, error=False):
+        self.reaction = "error" if error else "happy"
+        self.reaction_until = time.monotonic() + 2.5
         elapsed = time.monotonic() - self.started if self.started else 0
         if error:
             status = "Something went wrong"

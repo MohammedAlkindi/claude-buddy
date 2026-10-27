@@ -2,7 +2,9 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import queue
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -105,6 +107,74 @@ class StreamClaude(unittest.TestCase):
         script = "import sys; sys.stdin.read(); sys.stderr.write('not logged in'); sys.exit(1)"
         events = self.run_script(script)
         self.assertEqual(events, [("result", False, "not logged in")])
+
+    def test_timeout_covers_silent_stdout(self):
+        self.check_timeout("import sys,time; sys.stdin.read(); time.sleep(10)")
+
+    def test_timeout_covers_blocked_stdin(self):
+        self.check_timeout("import time; time.sleep(10)", prompt="x" * 1_000_000)
+
+    def test_timeout_covers_continuous_output(self):
+        self.check_timeout("import time\nwhile True:\n print('{}', flush=True)\n time.sleep(.01)")
+
+    def check_timeout(self, script, prompt="hi"):
+        events, started = [], []
+        conf = {"args": ["-c", script], "cwd": os.getcwd(), "timeout": .2}
+        before = time.monotonic()
+        with mock.patch.dict(buddy.MODES, {"ask": conf}):
+            buddy.stream_claude(sys.executable, "ask", prompt, started.append, events.append)
+        self.assertLess(time.monotonic() - before, 3)
+        self.assertIsNotNone(started[0].poll())
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][:2], ("result", False))
+        self.assertIn("so I stopped it", events[0][2])
+        self.assertTrue(all(pipe.closed for pipe in
+                            (started[0].stdin, started[0].stdout, started[0].stderr)))
+
+
+class PetAnimation(unittest.TestCase):
+    def test_idle_contains_a_blink_and_greeting(self):
+        poses = [buddy.pet_pose(i) for i in range(240)]
+        self.assertTrue(any(p["blink"] for p in poses))
+        self.assertTrue(any(p["wave"] for p in poses))
+        self.assertGreater(len({p["bob"] for p in poses}), 1)
+
+    def test_activity_poses_have_distinct_motion(self):
+        self.assertTrue(buddy.pet_pose(10, "happy")["wave"])
+        self.assertLess(buddy.pet_pose(10, "happy")["hop"], 0)
+        self.assertNotEqual(buddy.pet_pose(10, "working")["arm"], 0)
+        self.assertEqual(buddy.pet_pose(10, "thinking")["look"], 2)
+
+    def test_thinking_dots_clear_after_result_and_cancel(self):
+        pet = buddy.Buddy.__new__(buddy.Buddy)
+        pet.canvas, pet.root = mock.Mock(), mock.Mock()
+        pet.draw_pet = mock.Mock()
+        pet.tick_count, pet.press = 9, None
+        pet.reaction_until, pet.activity = 0, "thinking"
+        pet.busy = True
+        pet.tick()
+        pet.canvas.itemconfigure.assert_any_call("dot0", state="normal")
+        pet.events = queue.Queue()
+        pet.request_id, pet.last_mode, pet.pending_prompt = 1, "ask", "hello"
+        pet.stream_buf = ""
+        pet.show_reply = mock.Mock()
+        for finish in ("success", "error", "cancel"):
+            pet.busy = True
+            if finish != "cancel":
+                pet.events.put((pet.request_id, ("result", finish == "success", "done")))
+                with mock.patch.object(buddy, "append_history"):
+                    pet.poll_events()
+            else:
+                pet.proc = mock.Mock()
+                pet.proc.poll.return_value = None
+                proc = pet.proc
+                pet.cancel()
+                proc.kill.assert_called_once()
+            self.assertFalse(pet.busy)
+            pet.canvas.reset_mock()
+            pet.tick()
+            for i in range(3):
+                pet.canvas.itemconfigure.assert_any_call(f"dot{i}", state="hidden")
 
 
 class ModeWiring(unittest.TestCase):
