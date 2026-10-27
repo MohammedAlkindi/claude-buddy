@@ -22,7 +22,10 @@ import traceback
 from ctypes import wintypes
 from pathlib import Path
 
-APP_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "claude-buddy"
+# Not %LOCALAPPDATA%: a Pip started from an MSIX app (such as the Claude desktop
+# app) would write into that app's private copy of AppData, and a Pip started at
+# sign-in would never see it.
+APP_DIR = Path.home() / ".local" / "state" / "claude-buddy"
 STATE_FILE = APP_DIR / "state.json"
 LOG_FILE = APP_DIR / "buddy.log"
 
