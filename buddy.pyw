@@ -451,7 +451,7 @@ class Buddy:
         root.attributes("-topmost", True)
         root.attributes("-transparentcolor", KEY)
         root.configure(bg=KEY)
-        self.width, self.height = self.px(158), self.px(152)
+        self.width, self.height = self.px(176), self.px(164)
         c = self.canvas = tk.Canvas(root, width=self.width, height=self.height,
                                     bg=KEY, highlightthickness=0, bd=0)
         c.pack()
@@ -464,8 +464,8 @@ class Buddy:
             c.create_rectangle(bx, self.px(6), bx + self.px(4), self.px(10),
                                fill=CLAY_DARK, outline="", state="hidden", tags=(f"dot{i}",))
 
-        self.add_button("pencil", 124, 53, "")
-        self.add_button("mic", 124, 89, "")
+        self.add_button("pencil", 142, 53, "")
+        self.add_button("mic", 142, 89, "")
 
         c.tag_bind("hit", "<Enter>", lambda e: c.configure(cursor="fleur"))
         c.tag_bind("hit", "<Leave>", lambda e: c.configure(cursor=""))
