@@ -15,7 +15,6 @@ through the `claude` CLI, so it uses your login, not an API key.
 
 import ctypes
 import json
-import math
 import os
 import queue
 import shutil
@@ -28,6 +27,8 @@ import tkinter.font as tkfont
 import traceback
 from ctypes import wintypes
 from pathlib import Path
+
+from pip_art import PetRenderer, pet_pose
 
 # State lives outside AppData: launched from an MSIX app (such as the Claude
 # desktop app), an AppData write would land in that app's private copy and be
@@ -110,29 +111,6 @@ MUTED = "#8a7a70"
 ERROR = "#b3261e"
 SEL_ON = CLAY
 SEL_OFF = "#efe6e0"
-
-PET_OUTLINE = "#462c29"
-PET_SHADOW = "#b85c3c"
-PET_LIGHT = "#eeaa8c"
-PET_SCREEN = "#342c32"
-PET_SCREEN_EDGE = "#75483f"
-
-
-def pet_pose(frame, activity="idle"):
-    """Deterministic animation in logical pixels, independent of Tk and DPI."""
-    phase = frame * 0.12
-    wave = activity == "happy" or (activity == "idle" and frame % 240 >= 205)
-    blink = frame % 83 in (0, 1)
-    return {
-        "bob": round(math.sin(phase) * 2),
-        "lean": round(math.sin(phase * 0.5)) if activity == "idle" else 0,
-        "arm": round(math.sin(phase * 3) * 3) if wave or activity == "working" else 0,
-        "wave": wave,
-        "blink": blink and activity not in ("thinking", "error"),
-        "look": 2 if activity == "thinking" else (frame // 80 % 3 - 1),
-        "hop": -round(abs(math.sin(phase * 1.8)) * 5) if activity == "happy" else 0,
-        "feet": round(math.sin(phase * 2) * 2) if activity in ("working", "dragging") else 0,
-    }
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -436,6 +414,7 @@ class Buddy:
         self.bubble_state = None
         self.press = None
         self.tick_count = 0
+        self.animation_started = time.monotonic()
         self.activity = "idle"
         self.reaction_until = 0.0
         self.reaction = "happy"
@@ -453,7 +432,7 @@ class Buddy:
         self.build_menu()
         self.restore_position()
 
-        self.root.after(60, self.tick)
+        self.root.after(16, self.tick)
         self.root.after(80, self.poll_events)
         self.root.after(1500, self.reassert_topmost)
 
@@ -472,11 +451,12 @@ class Buddy:
         root.attributes("-topmost", True)
         root.attributes("-transparentcolor", KEY)
         root.configure(bg=KEY)
-        self.width, self.height = self.px(158), self.px(148)
+        self.width, self.height = self.px(158), self.px(152)
         c = self.canvas = tk.Canvas(root, width=self.width, height=self.height,
                                     bg=KEY, highlightthickness=0, bd=0)
         c.pack()
 
+        self.pet_renderer = PetRenderer(c, self.scale)
         self.draw_pet("idle")
         # Thinking dots, hidden until busy.
         for i in range(3):
@@ -495,77 +475,10 @@ class Buddy:
         c.bind("<Button-3>", self.show_menu)
         root.bind("<Escape>", lambda e: self.close_bubble())
 
-    def draw_pet(self, activity):
-        """Layered pixel silhouette with independently moving face and limbs.
-
-        Canvas-native artwork stays crisp at any DPI and needs no image library.
-        Only pet-tagged items are replaced; controls and thinking dots persist.
-        """
-        c = self.canvas
-        c.delete("pet")
-        pose = pet_pose(self.tick_count, activity)
-        dx, dy = pose["lean"], pose["bob"] + pose["hop"]
-
-        def poly(points, color, outline=PET_OUTLINE, width=2):
-            coords = [(v + (dx if i % 2 == 0 else dy)) * self.scale
-                      for i, v in enumerate(points)]
-            return c.create_polygon(*coords, fill=color, outline=outline,
-                                    width=self.px(width), joinstyle="miter", tags=("pet", "hit"))
-
-        def rect(x1, y1, x2, y2, color):
-            return poly([x1, y1, x2, y1, x2, y2, x1, y2], color, "", 0)
-
-        # Boots behind the tunic, opposite motion while working or being carried.
-        f = pose["feet"]
-        poly([42, 112, 54, 112, 54, 128+f, 48, 136+f, 38, 136+f, 35, 131+f], CLAY)
-        poly([65, 112, 77, 112, 81, 126-f, 76, 133-f, 66, 133-f, 62, 127-f], PET_SHADOW)
-        rect(39, 129+f, 47, 132+f, PET_LIGHT)
-        # Mittens: a periodic greeting, typing while working, or raised on drag.
-        left = -4 if activity == "dragging" else pose["arm"]
-        right = -13 + pose["arm"] if pose["wave"] else -left
-        poly([37, 86, 29, 90+left, 20, 85+left, 15, 87+left, 14, 94+left,
-              20, 100+left, 31, 102+left, 41, 96], CLAY)
-        poly([82, 85, 90, 90+right, 99, 85+right, 105, 87+right, 106, 94+right,
-              99, 100+right, 89, 101+right, 79, 95], CLAY)
-        # Little hoodie with an illuminated terminal mark.
-        poly([43, 86, 75, 86, 82, 96, 80, 112, 71, 121, 48, 121, 39, 111, 38, 98], CLAY)
-        poly([41, 99, 48, 114, 73, 114, 79, 105, 77, 115, 70, 121, 49, 121, 40, 112],
-             PET_SHADOW, "", 0)
-        rect(47, 96, 72, 99, CLAY_SHEEN)
-        poly([51, 102, 55, 102, 60, 107, 55, 112, 51, 112, 56, 107], EYE, "", 0)
-        rect(63, 110, 70, 112, EYE)
-        # Rounded, scalloped hood: stepped edges match the reference's pixel art.
-        hood = [19, 48, 23, 37, 30, 37, 30, 29, 40, 29, 44, 23, 55, 21,
-                61, 24, 68, 21, 78, 23, 83, 29, 92, 31, 92, 38, 99, 41,
-                103, 51, 103, 70, 99, 80, 92, 87, 81, 92, 40, 92,
-                29, 88, 22, 80, 18, 68, 18, 54]
-        poly(hood, CLAY)
-        poly([20, 61, 25, 74, 32, 82, 44, 86, 83, 86, 95, 78, 102, 64,
-              99, 80, 91, 87, 81, 92, 40, 92, 29, 88, 22, 80, 18, 68],
-             PET_SHADOW, "", 0)
-        poly([25, 48, 29, 40, 35, 40, 35, 33, 45, 32, 49, 27, 56, 26,
-              59, 29, 48, 32, 44, 37, 35, 38, 33, 46], PET_LIGHT, "", 0)
-        # Deep face panel with warm rim and a small reflected highlight.
-        poly([42, 46, 79, 46, 86, 52, 87, 74, 81, 81, 42, 81, 36, 75, 36, 53], PET_SCREEN_EDGE)
-        poly([43, 49, 78, 49, 83, 53, 84, 73, 79, 77, 43, 77, 40, 73, 40, 54],
-             PET_SCREEN, "", 0)
-        rect(45, 50, 66, 52, "#514047")
-        look = pose["look"]
-        if pose["blink"]:
-            rect(46, 65, 54, 67, EYE)
-            rect(66, 65, 75, 67, EYE)
-        elif activity == "error":
-            rect(48, 58, 51, 66, EYE)
-            rect(48, 69, 51, 72, EYE)
-            rect(67, 63, 76, 66, EYE)
-        elif activity == "happy":
-            for x in (46, 66):
-                poly([x, 65, x+4, 60, x+8, 65, x+8, 69, x+4, 65, x, 69], EYE, "", 0)
-        else:
-            poly([46+look, 57, 50+look, 57, 56+look, 63, 50+look, 69,
-                  46+look, 69, 51+look, 63], EYE, "", 0)
-            rect(66+look, 66, 77+look, 69, EYE)
-        c.tag_lower("pet")
+    def draw_pet(self, activity, seconds=None):
+        if seconds is None:
+            seconds = time.monotonic() - self.animation_started
+        self.pet_renderer.draw(seconds, activity)
 
     def add_button(self, name, x, y, glyph):
         c = self.canvas
@@ -617,7 +530,6 @@ class Buddy:
 
     def tick(self):
         self.tick_count += 1
-        t = self.tick_count
         c = self.canvas
         activity = "idle"
         if self.press and self.press["dragged"]:
@@ -628,10 +540,10 @@ class Buddy:
             activity = self.reaction
         self.draw_pet(activity)
         # Always reset all three: a result/cancel can arrive at any dot phase.
-        shown = (t // 5) % 4 if self.busy else 0
+        shown = int((time.monotonic() - self.animation_started) / .3) % 4 if self.busy else 0
         for i in range(3):
             c.itemconfigure(f"dot{i}", state="normal" if i < shown else "hidden")
-        self.root.after(60, self.tick)
+        self.root.after(16, self.tick)
 
     # ---- position ---------------------------------------------------------
 

@@ -150,6 +150,7 @@ class PetAnimation(unittest.TestCase):
         pet.canvas, pet.root = mock.Mock(), mock.Mock()
         pet.draw_pet = mock.Mock()
         pet.tick_count, pet.press = 9, None
+        pet.animation_started = time.monotonic() - .65
         pet.reaction_until, pet.activity = 0, "thinking"
         pet.busy = True
         pet.tick()

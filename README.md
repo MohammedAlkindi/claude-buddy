@@ -4,9 +4,9 @@
 Pip is a small mascot that floats on top of your Windows desktop, even over Zoom. Click the pencil, type a question, and Claude's reply appears in a speech bubble next to Pip. The mic button starts Windows voice typing so you can dictate the question.
 
 ## Architecture
-Everything lives in one file, `buddy.pyw`, which uses Python's built-in `tkinter`. No packages to install.
+`buddy.pyw` handles the assistant and windows; `pip_art.py` contains the artwork and animation. Both use Python's standard library and built-in `tkinter`. No packages to install.
 
-- **Mascot window:** a frameless, always-on-top window with a transparent background. Pip has a rounded terracotta hood, a dark terminal face, and a little hoodie. Canvas-drawn animation includes breathing, blinking, greetings, thinking, working, dragging, and brief success/error reactions. Drag Pip to move it. The position is saved to `~\.local\state\claude-buddy\state.json`.
+- **Mascot window:** a frameless, always-on-top window with a transparent background. Pip has a fluffy terracotta hood, a dark terminal face, and a little hoodie. Animation uses elapsed time, fractional positions, eased pose transitions, and retained canvas shapes at up to 60 frames per second. Breathing, blinks, head tilts, greetings, hand gestures, and dangling feet have independent motion. Thinking, working, dragging, and brief success/error reactions blend smoothly. Drag Pip to move it. The position is saved to `~\.local\state\claude-buddy\state.json`.
 - **Asking Claude:** each question runs `claude -p` (the Claude Code CLI) on a background thread, so the window never freezes. It uses your Claude login. Ask mode uses `--safe-mode` and `--tools ""` for chat; Do it enables tools. Change `MODES` near the top of the file to adjust flags and timeouts. The deadline covers the whole streaming request, including a silent process or blocked prompt input. Thinking dots disappear after completion or cancellation.
 - **Speech bubble:** shows the reply with Copy and Close buttons. Esc closes it, and also cancels a question that is still running.
 - **Mic:** opens the text box, focuses it, and presses Win+H for Windows voice typing.
