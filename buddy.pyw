@@ -28,7 +28,7 @@ import traceback
 from ctypes import wintypes
 from pathlib import Path
 
-from pip_art import PetRenderer, pet_pose
+from pip_art import PetRenderer
 
 # State lives outside AppData: launched from an MSIX app (such as the Claude
 # desktop app), an AppData write would land in that app's private copy and be
@@ -451,7 +451,7 @@ class Buddy:
         root.attributes("-topmost", True)
         root.attributes("-transparentcolor", KEY)
         root.configure(bg=KEY)
-        self.width, self.height = self.px(176), self.px(164)
+        self.width, self.height = self.px(128), self.px(166)
         c = self.canvas = tk.Canvas(root, width=self.width, height=self.height,
                                     bg=KEY, highlightthickness=0, bd=0)
         c.pack()
@@ -464,8 +464,10 @@ class Buddy:
             c.create_rectangle(bx, self.px(6), bx + self.px(4), self.px(10),
                                fill=CLAY_DARK, outline="", state="hidden", tags=(f"dot{i}",))
 
-        self.add_button("pencil", 142, 53, "")
-        self.add_button("mic", 142, 89, "")
+        c.create_polygon(*self.xy(*round_rect(24,128,104,164,18)), smooth=True,
+                         fill="#1f1f1f", outline="", tags=("controls",))
+        self.add_button("pencil", 32, 132, "")
+        self.add_button("mic", 68, 132, "")
 
         c.tag_bind("hit", "<Enter>", lambda e: c.configure(cursor="fleur"))
         c.tag_bind("hit", "<Leave>", lambda e: c.configure(cursor=""))
@@ -478,18 +480,20 @@ class Buddy:
     def draw_pet(self, activity, seconds=None):
         if seconds is None:
             seconds = time.monotonic() - self.animation_started
+        x,y = self.canvas.winfo_pointerxy()
+        self.pet_renderer.set_pointer(x-self.canvas.winfo_rootx(), y-self.canvas.winfo_rooty())
         self.pet_renderer.draw(seconds, activity)
 
     def add_button(self, name, x, y, glyph):
         c = self.canvas
         tag = f"btn_{name}"
-        circle = c.create_oval(*self.xy(x, y, x + 28, y + 28), fill=PAPER, outline=CLAY_DARK,
-                               width=max(1, self.px(1.5)), tags=(tag, "button"))
-        c.create_text(*self.xy(x + 14, y + 14), text=glyph, font=self.icons, fill=CLAY_DARK,
+        circle = c.create_oval(*self.xy(x, y, x + 28, y + 28), fill="#1f1f1f", outline="",
+                               width=0, tags=(tag, "button"))
+        c.create_text(*self.xy(x + 14, y + 14), text=glyph, font=self.icons, fill="#eee5df",
                       tags=(tag, "button"))
-        c.tag_bind(tag, "<Enter>", lambda e: (c.itemconfigure(circle, fill=HOVER),
+        c.tag_bind(tag, "<Enter>", lambda e: (c.itemconfigure(circle, fill="#3b302a"),
                                               c.configure(cursor="hand2")))
-        c.tag_bind(tag, "<Leave>", lambda e: (c.itemconfigure(circle, fill=PAPER),
+        c.tag_bind(tag, "<Leave>", lambda e: (c.itemconfigure(circle, fill="#1f1f1f"),
                                               c.configure(cursor="")))
 
     def target_at(self, event):

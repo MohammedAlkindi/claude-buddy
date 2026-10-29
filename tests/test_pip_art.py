@@ -1,93 +1,57 @@
-import math
+import struct
 import unittest
+import zlib
 from unittest import mock
-
-from pip_art import PetRenderer, pet_pose, claude_pixel, sprite_rgba, sprite_png, sprite_layers
-from pip_pixels import PIXELS, WIDTH, HEIGHT
+from pip_art import PetRenderer, frame_png, frame_rgba, DISPLAY_WIDTH, DISPLAY_HEIGHT
 
 
-class NaturalAnimation(unittest.TestCase):
-    def renderer(self):
-        canvas = mock.Mock()
-        canvas.create_image.side_effect = range(1,100)
-        return PetRenderer(canvas, image_factory=mock.Mock()), canvas
+def png_rows(png):
+    width,height=struct.unpack('!2I',png[16:24]); offset=8; chunks=[]
+    while offset<len(png):
+        n=struct.unpack('!I',png[offset:offset+4])[0]
+        if png[offset+4:offset+8]==b'IDAT':chunks.append(png[offset+8:offset+8+n])
+        offset+=n+12
+    raw=zlib.decompress(b''.join(chunks));stride=width*4+1
+    assert all(raw[y*stride]==0 for y in range(height))
+    return width,height,b''.join(raw[y*stride+1:(y+1)*stride] for y in range(height))
 
-    def test_reuses_hit_targets_instead_of_recreating_every_frame(self):
-        renderer, canvas = self.renderer()
-        renderer.draw(0)
-        self.assertEqual(canvas.create_image.call_count, 7)
-        for i in range(1, 100):
-            renderer.draw(i / 60, "working" if i > 50 else "idle")
-        self.assertEqual(canvas.create_image.call_count, 7)
-        canvas.create_polygon.assert_not_called()
+
+class SpriteRendering(unittest.TestCase):
+    def test_transparency_has_no_magenta_blended_fringe(self):
+        w,h,rgba=png_rows(frame_png(0,0,1.5,True))
+        self.assertEqual(set(rgba[3::4]),{0,255})
+        self.assertTrue(any(rgba[3::4]))
+        for i in range(0,len(rgba),4):
+            if rgba[i+3]:self.assertNotEqual(rgba[i:i+3],bytes((255,0,255)))
+
+    def test_nearest_sampling_preserves_the_actual_authored_pixels(self):
+        source=frame_rgba(3,2)
+        for scale in (1,1.5):
+            w,h,rgba=png_rows(frame_png(3,2,scale))
+            for y in range(h):
+                sy=min(207,int((y+.5)*208/h))
+                for x in range(w):
+                    sx=min(191,int((x+.5)*192/w));i=(sy*192+sx)*4;j=(y*w+x)*4
+                    self.assertEqual(rgba[j:j+4],source[i:i+4])
+
+    def test_renderer_caches_images_and_keeps_one_stable_hit_target(self):
+        canvas=mock.Mock();canvas.create_image.return_value=1;factory=mock.Mock()
+        renderer=PetRenderer(canvas,image_factory=factory)
+        for i in range(660):renderer.draw(i/100,'idle')
+        self.assertEqual(canvas.create_image.call_count,1)
+        self.assertEqual(factory.call_count,6)
+        self.assertEqual(len(renderer.images),6)
+        canvas.coords.assert_not_called()
         canvas.delete.assert_not_called()
 
-    def test_activity_change_eases_in_and_settles(self):
-        renderer, _ = self.renderer()
-        renderer.draw(0, "idle")
-        renderer.draw(.016, "happy")
-        self.assertGreater(renderer.pose["smile"], 0)
-        self.assertLess(renderer.pose["smile"], .15)
-        for i in range(2, 100):
-            renderer.draw(i * .016, "happy")
-        self.assertGreater(renderer.pose["smile"], .999)
-        renderer.draw(1.6, "idle")
-        self.assertGreater(renderer.pose["smile"], .8)
+    def test_invalid_atlas_cells_are_rejected(self):
+        for cell in ((-1,0),(11,0),(0,8)):
+            with self.assertRaises(ValueError):frame_rgba(*cell)
 
-    def test_transition_response_is_independent_of_frame_rate(self):
-        values = []
-        for fps in (30, 60, 120):
-            renderer, _ = self.renderer()
-            renderer.draw(0, "idle")
-            for i in range(1, fps+1):
-                renderer.draw(i/fps, "happy")
-            values.append(renderer.pose["smile"])
-        self.assertLess(max(values) - min(values), 1e-10)
-
-    def test_motion_is_fractional_and_continuous(self):
-        before, after = pet_pose(10), pet_pose(10 + .016/.06)
-        self.assertNotEqual(before["bob"], round(before["bob"]))
-        self.assertLess(abs(after["bob"] - before["bob"]), .06)
-        for activity in ("idle", "thinking", "working", "happy", "error", "dragging"):
-            for i in range(1000):
-                self.assertTrue(all(math.isfinite(v) for v in pet_pose(i/4, activity).values()))
+    def test_control_strip_can_fit_below_without_overlaying_the_pet(self):
+        self.assertLess(DISPLAY_HEIGHT,128)
+        self.assertLess(8+DISPLAY_WIDTH,128)
+        self.assertLess(132+28,166)
 
 
-class ReferenceFidelity(unittest.TestCase):
-    def test_neutral_rig_composites_to_exact_reference_colors_and_geometry(self):
-        layers = sprite_layers()
-        composite = bytearray(WIDTH*HEIGHT*4)
-        for name in ('foot_l','foot_r','arm_l','arm_r','torso','head','eye0'):
-            pixels = layers[name]
-            for i in range(0,len(pixels),4):
-                if pixels[i+3]:
-                    composite[i:i+4] = pixels[i:i+4]
-        self.assertEqual(bytes(composite), sprite_rgba())
-
-    def test_reference_pose_has_no_layer_offsets(self):
-        self.assertTrue(all(value == 0 for value in pet_pose(123,'reference').values()))
-
-    def test_palette_swap_preserves_every_alpha_pixel(self):
-        tinted = sprite_rgba()
-        self.assertEqual(len(tinted), WIDTH * HEIGHT * 4)
-        self.assertEqual(tinted[3::4], PIXELS[3::4])
-        self.assertEqual(sum(a > 0 for a in tinted[3::4]), 12564)
-
-    def test_main_blue_maps_to_claude_terracotta(self):
-        self.assertEqual(claude_pixel(131, 158, 243), (217, 119, 87))
-        self.assertEqual(claude_pixel(4, 4, 4), (4, 4, 4))
-        cream = claude_pixel(180, 240, 242)
-        self.assertGreater(cream[0], cream[1])
-        self.assertGreater(cream[1], cream[2])
-
-    def test_dpi_png_dimensions_follow_the_reference(self):
-        import struct
-        for scale in (1, 1.25, 1.5, 2):
-            png = sprite_png(scale)
-            self.assertEqual(png[:8], b'\x89PNG\r\n\x1a\n')
-            self.assertEqual(struct.unpack('!2I', png[16:24]),
-                             (round(WIDTH*scale), round(HEIGHT*scale)))
-
-
-if __name__ == "__main__":
-    unittest.main()
+if __name__=='__main__':unittest.main()

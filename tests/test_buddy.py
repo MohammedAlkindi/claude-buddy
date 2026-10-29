@@ -133,17 +133,17 @@ class StreamClaude(unittest.TestCase):
 
 
 class PetAnimation(unittest.TestCase):
-    def test_idle_contains_a_blink_and_greeting(self):
-        poses = [buddy.pet_pose(i) for i in range(240)]
-        self.assertTrue(any(p["blink"] for p in poses))
-        self.assertTrue(any(p["wave"] for p in poses))
-        self.assertGreater(len({p["bob"] for p in poses}), 1)
+    def test_renderer_uses_native_atlas(self):
+        from pip_art import frame_at
+        self.assertEqual(frame_at('idle',0),(0,0))
+        self.assertEqual(frame_at('idle',1.7),(0,1))
+        self.assertEqual(frame_at('running',.13),(7,1))
 
-    def test_activity_poses_have_distinct_motion(self):
-        self.assertTrue(buddy.pet_pose(10, "happy")["wave"])
-        self.assertLess(buddy.pet_pose(10, "happy")["hop"], 0)
-        self.assertNotEqual(buddy.pet_pose(10, "working")["arm"], 0)
-        self.assertEqual(buddy.pet_pose(10, "thinking")["look"], 2)
+    def test_activities_use_authored_complete_frames(self):
+        from pip_art import ACTIVITIES
+        self.assertEqual(ACTIVITIES['working'],'running')
+        self.assertEqual(ACTIVITIES['thinking'],'review')
+        self.assertEqual(ACTIVITIES['happy'],'jumping')
 
     def test_thinking_dots_clear_after_result_and_cancel(self):
         pet = buddy.Buddy.__new__(buddy.Buddy)

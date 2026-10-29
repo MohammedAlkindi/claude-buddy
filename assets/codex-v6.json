@@ -1,0 +1,11 @@
+{
+  "width": 1536,
+  "height": 2288,
+  "cell_width": 192,
+  "cell_height": 208,
+  "columns": 8,
+  "rows": 11,
+  "source": "OpenAI.Codex 26.1021.3705.0: codex-spritesheet-v6-51045ae208c0.webp",
+  "source_sha256": "ac2990f24d55372411cebdc66a726e1fcbf5e80ec95378e2d25a6241abbedf88",
+  "rgba_sha256": "e640a8808a6ea42d1aa160bfd79745d6ef632a8d6a540c2d1386128a97ae04b2"
+}
